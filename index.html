@@ -1,0 +1,2733 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Ox-Py WDE</title>
+    <script src="https://cdn.jsdelivr.net/pyodide/v0.29.3/full/pyodide.js"></script>
+    <!--<script defer src="/fonts/js/fontawesome.js"></script>
+    <script defer src="/fonts/js/all.js"></script>
+    <script defer src="/fonts/js/all.min.js"></script> -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/wabt@1.0.35/index.js"></script>
+    <script src="https://kit.fontawesome.com/7896fcb601.js" crossorigin="anonymous"></script>
+
+<link rel="icon" href="/favicon.png" sizes="128x128">
+
+
+<script src="oxpy_tcc.js"></script>
+
+<script>
+let tccInstance = null;
+
+// Initialize the engine as soon as the page is ready
+async function initTCC() {
+    try {
+        // 'createTCC' matches the EXPORT_NAME from your emcc command
+        tccInstance = await createTCC({
+            locateFile: (path) => `./${path}`,
+            print: (text) => console.log(`[TCC Stdout]: ${text}`),
+            printErr: (text) => console.error(`[TCC Stderr]: ${text}`)
+        });
+        console.log("Ox-Py TCC Engine Ready");
+    } catch (e) {
+        console.error("TCC Initialization failed:", e);
+    }
+}
+
+initTCC();
+</script>
+
+
+    <script>
+// Use the browser-compatible ESM version via a dynamic import
+let WASI;
+import('https://unpkg.com/@wasmer/wasi@0.11.2/lib/index.esm.js').then(mod => {
+    WASI = mod.WASI;
+});
+
+
+window.wat2wasm_compiler = async (watCode) => {
+    // WabtModule is the factory
+    const factory = await WabtModule(); 
+    const module = factory.parseWat("test.wat", watCode, {});
+    const binary = module.toBinary({ log: false });
+    
+    // Explicitly create a Uint8Array from the result buffer
+    const buffer = new Uint8Array(binary.buffer);
+    
+    module.destroy();
+    return buffer;
+};
+    </script>
+    <style>
+        /* --- 1. CORE SYSTEM & LAYERS --- */
+        body { margin: 0; overflow: hidden; background: #000; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; user-select: none; }
+        
+#desktop-bg {
+    position: absolute;
+    width: 100vw;
+    height: 100vh;
+    z-index: 1;
+    background: radial-gradient(circle at center, #302c36 0%, #111 100%);
+    overflow:hidden;
+}
+#desktop-bg canvas {
+        filter: blur(90px); /* Heavier blur for smoother silk */
+        transform: scale(1.3); 
+        opacity: 0.65;
+    }
+#desktop-windows {
+    position: absolute;
+    width: 100vw;
+    height: calc(100vh - 40px);
+    z-index: 2;
+    overflow: hidden;
+}
+        
+        /* --- 2. SHELL UI (Taskbar & Start Menu) --- */
+        #taskbar { position: absolute; bottom: 0; left: 0; width: 100%; height: 40px; background: rgba(30, 30, 30, 0.95); backdrop-filter: blur(5px); z-index: 9999; display: flex; align-items: center; border-top: 1px solid #444; padding: 0 10px; box-sizing: border-box; }
+        
+        .start-btn { background: #007acc; color: white; border: none; padding: 6px 15px; border-radius: 4px; cursor: pointer; font-weight: bold; margin-right: 15px; }
+        .start-btn:hover { background: #0098ff; }
+        
+        #taskbar-apps { display: flex; gap: 5px; flex-grow: 1; overflow-x: auto; }
+        .taskbar-item { background: #333; color: #ddd; border: 1px solid #555; padding: 5px 15px; border-radius: 4px; cursor: pointer; font-size: 13px; max-width: 150px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .taskbar-item:hover { background: #444; }
+        .taskbar-item.active { background: #555; border-bottom: 2px solid #007acc; }
+
+        #start-menu { position: absolute; bottom: 45px; left: 10px; width: 250px; background: rgba(40, 40, 40, 0.95); border: 1px solid #555; border-radius: 6px; z-index: 10000; display: none; flex-direction: column; padding: 10px; box-shadow: 0 5px 15px rgba(0,0,0,0.5); }
+        #start-menu.visible { display: flex; }
+        .start-menu-item { background: transparent; color: #eee; border: none; padding: 10px; text-align: left; cursor: pointer; border-radius: 4px; font-size: 14px; }
+        .start-menu-item:hover { background: #007acc; color: white; }
+
+        /* --- 3. WINDOW MANAGER --- */
+        .window {
+            /* This makes the window itself clickable again */
+            pointer-events: auto; 
+            position: absolute;
+            width: 450px;
+            height: 300px;
+            background: #222;
+            border: 1px solid #444;
+            border-radius: 8px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.6);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            resize: none;
+            min-width: 250px;
+            min-height: 150px;
+        }
+        /* Create the new corner handle */
+        .window-resizer {
+            position: absolute;
+            width: 20px;
+            height: 20px;
+            right: 0;
+            bottom: 0;
+            cursor: nwse-resize;
+            z-index: 10;
+            touch-action: none; /* Crucial for mobile */
+            /* Optional: add a small visual indicator like a triangle */
+            background: linear-gradient(135deg, transparent 50%, #444 50%);
+        }
+        .titlebar {
+            background: #333;
+            color: #ccc;
+            padding: 6px 10px;
+            cursor: move; /* Changed from grab to move for clarity */
+            font-size: 13px;
+            font-weight: bold;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            /* Prevent text highlighting while dragging */
+            user-select: none; 
+            -webkit-user-select: none;
+            touch-action: none;
+        }
+        .titlebar:active { cursor: grabbing; }
+        .close-btn { background: #cc0000; color: white; border: none; border-radius: 50%; width: 18px; height: 18px; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: 14px; line-height: 1; }
+        .close-btn:hover { background: #ff3333; }
+
+
+        
+        .content { padding: 0; flex-grow: 1; display: flex; flex-direction: column; overflow: hidden; background: #1e1e1e; }
+        
+        /* --- 4. APP SPECIFICS --- */
+        .terminal-container { display: flex; flex-direction: column; height: 100%; width: 100%; padding: 5px; box-sizing: border-box; }
+        .terminal-output { flex-grow: 1; white-space: pre-wrap; overflow-y: auto; background: #000; color: #0f0; font-family: monospace; padding: 5px; font-size: 13px; }
+        .terminal-input {
+            width: 100%;
+            background: #000;
+            color: #0f0;
+            border: none;
+            border-top: 1px solid #333;
+            outline: none;
+            font-family: 'Courier New', Courier, monospace;
+            padding: 8px;
+            box-sizing: border-box;
+            font-size: 13px;
+            /* Smooth transitions for multi-line feel */
+            transition: height 0.2s;
+        }
+        .terminal-input:focus {
+            background: #050505;
+            border-top: 1px solid #007acc;
+        }
+        .explorer-container { padding: 10px; overflow-y: auto; height: 100%; color: #eee; font-family: monospace; }
+        .file-item { padding: 6px; border-bottom: 1px solid #333; cursor: pointer; display: flex; align-items: center; gap: 8px; }
+        .file-item:hover { background: #3a3a3a; }
+        .file-dir { color: #5bc0de; font-weight: bold; }
+        .file-file { color: #dfdfdf; }
+
+
+        /* --- CONTEXT MENU STYLING --- */
+#context-menu {
+    position: fixed;
+    display: none;
+    z-index: 10001;
+    background: #2b2b2b;
+    border: 1px solid #444;
+    border-radius: 4px;
+    box-shadow: 0 4px 10px rgba(0,0,0,0.5);
+    width: 170px;
+    padding: 5px 0;
+}
+.context-item {
+    padding: 8px 12px;
+    color: #eee;
+    font-size: 13px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+.context-item:hover {
+    background: #007acc;
+    color: white;
+}
+.context-item i { width: 16px; color: #888; }
+.context-item:hover i { color: white; }
+
+        /* --- 5. LOGIN SCREEN --- */
+        #login-screen {
+            position: fixed; inset: 0; z-index: 99999;
+            background: radial-gradient(ellipse at center, #1a1a2e 0%, #0a0a0f 100%);
+            display: flex; align-items: center; justify-content: center;
+        }
+        #login-box {
+            background: rgba(30,30,40,0.97);
+            border: 1px solid #333;
+            border-radius: 12px;
+            padding: 40px 48px;
+            width: 340px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.8);
+            display: flex; flex-direction: column; gap: 16px;
+            color: #eee; font-family: 'Segoe UI', sans-serif;
+        }
+        #login-box h1 { margin: 0 0 4px; font-size: 22px; color: #fff; text-align: center; }
+        #login-box p.subtitle { margin: 0 0 8px; font-size: 12px; color: #666; text-align: center; }
+        #login-box input[type=text],
+        #login-box input[type=password] {
+            width: 100%; box-sizing: border-box;
+            padding: 10px 14px; background: #111; border: 1px solid #444;
+            border-radius: 6px; color: #eee; font-size: 14px; outline: none;
+        }
+        #login-box input:focus { border-color: #007acc; }
+        #login-submit-btn {
+            padding: 11px; background: #007acc; color: white; border: none;
+            border-radius: 6px; font-size: 15px; font-weight: bold; cursor: pointer;
+        }
+        #login-submit-btn:hover { background: #0098ff; }
+        #login-toggle { background: none; border: none; color: #007acc; font-size: 13px; cursor: pointer; text-align: center; }
+        #login-toggle:hover { color: #0098ff; }
+        #login-msg { font-size: 13px; min-height: 20px; text-align: center; color: #ff5555; }
+
+    </style>
+</head>
+
+<body>
+<input type="file" id="host-import-input" style="display: none;" multiple>
+<div id="context-menu">
+    <div class="context-item" id="ctx-import"><i class="fa-solid fa-file-import"></i> Import</div>
+    <div class="context-item" id="ctx-export"><i class="fa-solid fa-file-import"></i> Export</div>
+    <div style="height: 1px; background: #444; margin: 4px 0;"></div>
+    <!-- File-item actions -->
+    <div id="ctx-run" class="context-item" style="color: #5bc0de;"><i class="fa-solid fa-play"></i> Run Script</div>
+    <div class="context-item" id="ctx-open">       <i class="fa-solid fa-folder-open"></i>       Open</div>
+    <div class="context-item" id="ctx-rename">     <i class="fa-solid fa-pencil"></i>             Rename</div>
+    <div class="context-item" id="ctx-copy">       <i class="fa-solid fa-copy"></i>               Copy</div>
+    <div style="height:1px; background:#444; margin:4px 0;" id="ctx-sep-1"></div>
+    <!-- Explorer empty-space actions -->
+    <div class="context-item" id="ctx-new-file">   <i class="fa-solid fa-file-circle-plus"></i>   New File</div>
+    <div class="context-item" id="ctx-new-folder"> <i class="fa-solid fa-folder-plus"></i>        New Folder</div>
+    <!-- Shared -->
+    <div class="context-item" id="ctx-paste">      <i class="fa-solid fa-paste"></i>              Paste</div>
+    <div style="height:1px; background:#444; margin:4px 0;" id="ctx-sep-2"></div>
+    <div class="context-item" id="ctx-delete" style="color:#ff5555;"><i class="fa-solid fa-trash-can"></i> Delete</div>
+</div>
+    
+    <!-- Login Screen -->
+    <div id="login-screen">
+        <div id="login-box">
+            <h1><i class="fa-solid fa-user-lock fa-2xl" style="color: rgb(0, 255, 28);"></i></h1>
+            <p class="subtitle" id="login-mode-label">Sign in to your account</p>
+            <input type="text"     id="login-username" placeholder="Username" autocomplete="off">
+            <input type="password" id="login-password" placeholder="Password">
+            <div id="login-msg"></div>
+            <button id="login-submit-btn">Login</button>
+            <button id="login-toggle">Create a new account</button>
+            
+        </div>
+    <a style="justify-content: center; color:#666666; display: flex; position: absolute; top:96%; left: 94%; font-size: x-small;">Ox-Py WDE</a>    
+    </div>
+    
+    <!-- Layers -->
+
+<div id="splash-screen" style="display: none; position: fixed; inset: 0; z-index: 999999; background: #0f0f0f; color: #eee; flex-direction: column; align-items: center; justify-content: center; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;">
+    <div style="text-align: left; max-width: 500px; width: 90%; padding: 30px; background: #1a1a1a; border: 1px solid #333; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.5);">
+        <h2 style="margin-top: 0; color: #007acc; border-bottom: 1px solid #333; padding-bottom: 10px;">Ox-Py WDE Environment</h2>
+        
+        <div style="max-height: 300px; overflow-y: auto; font-size: 0.85rem; line-height: 1.5; color: #bbb; padding-right: 10px; margin-bottom: 20px;">
+            <p><strong>EXPERIMENTAL SOFTWARE NOTICE:</strong></p>
+            <p>Ox-Py is provided for educational and experimental purposes only. By clicking "I Accept," you acknowledge and agree to the following:</p>
+            
+            <ol style="padding-left: 20px;">
+                <li><strong>"AS-IS" WARRANTY:</strong> THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE.</li>
+                <li><strong>LIMITATION OF LIABILITY:</strong> IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.</li>
+                <li><strong>USER RESPONSIBILITY:</strong> You are solely responsible for any data loss, system instability, or damages resulting from the execution of code within this environment, including but not limited to memory-unsafe operations via TCC or Python.</li>
+                <li><strong>THIRD-PARTY COMPONENTS:</strong> This environment utilizes Pyodide, TCC, and other open-source libraries. Their respective licenses apply to those components.</li>
+            </ol>
+            <p style="font-style: italic;">The entire risk as to the quality and performance of the software is with you.</p>
+        </div>
+
+        <div style="display: flex; justify-content: flex-end; gap: 10px;">
+            <button id="accept-splash-btn" style="padding: 10px 25px; background: #007acc; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; transition: background 0.2s;">I Accept & Continue</button>
+        </div>
+    </div>
+</div>
+
+    <div id="desktop-bg"></div>
+    <div id="desktop-windows"></div>
+    
+    <!-- Taskbar & Menus -->
+    <div id="taskbar">
+        <button class="start-btn" id="btn-start">Start</button>
+        <div id="taskbar-apps"></div>
+    </div>
+    
+    <div id="start-menu">
+        <div style="color: #888; font-size: 11px; padding-bottom: 5px; border-bottom: 1px solid #444; margin-bottom: 5px;">APPLICATIONS</div>
+        <button class="start-menu-item" onclick="AppRegistry.launchTerminal()"><i class="fa-solid fa-terminal" style="color: rgb(116, 192, 252);"></i> Python Terminal</button>
+        <button class="start-menu-item" onclick="AppRegistry.launchExplorer()"><i class="fa-solid fa-folder-open" style="color: rgb(116, 192, 252);"></i> File Explorer</button>
+        <button class="start-menu-item" onclick="AppRegistry.launchSoftwareCenter()"><i class="fa-solid fa-box-archive" style="color: rgb(177, 151, 252);"></i> Software Center</button>
+        <button class="start-menu-item" onclick="AppRegistry.launchEditor()"><i class="fa-solid fa-file-pen" style="color: rgb(99, 230, 190);"></i> Text Editor</button>
+        <button class="start-menu-item" onclick="AppRegistry.launchGraphicsApp()"><i class="fa-regular fa-window-maximize" style="color: rgb(209, 99, 230);"></i> Graphics Window</button>
+    </div>
+
+
+
+    <script type="module">
+    // Add this at the very top of your script section in index.html
+import { WASI } from 'https://unpkg.com/@wasmer/wasi@0.11.2/lib/index.esm.js';
+window.WASI = WASI; // Make it global for the rest of your code
+        // --- GLOBALS ---
+        let pyodide = null;
+        let zIndexCounter = 10;
+        let windowIdCounter = 0;
+        // --- UPDATED GLOBALS ---
+        //const MOUNT_POINT = "/myhome"; // New persistent path
+        //const PKG_CONFIG_FILE = MOUNT_POINT + "/packages_to_install_on_every_start.py";
+        
+        // Dynamic Global Update
+        let MOUNT_POINT = "/myhome/default"; // Overwritten at login
+        let PKG_CONFIG_FILE = "";            // Set after login
+        let currentUser = "user";           // Set after login
+
+        let osClipboard = { path: null, type: null }; // Global OS clipboard
+        const ctxMenu = document.getElementById('context-menu');
+
+        // --- SHELL UI LOGIC ---
+        const startMenu = document.getElementById('start-menu');
+        const btnStart = document.getElementById('btn-start');
+        
+        btnStart.addEventListener('click', (e) => {
+            e.stopPropagation();
+            startMenu.classList.toggle('visible');
+        });
+
+        // Close start menu if clicking desktop
+        document.getElementById('desktop-bg').addEventListener('click', () => {
+            startMenu.classList.remove('visible');
+        });
+
+
+// Ugh let it have control then grab the graphics display
+// --- THE GHOSTBUSTER PLOT CATCHER ---
+const plotObserver = new MutationObserver((mutations) => {
+    mutations.forEach((mutation) => {
+        mutation.addedNodes.forEach((node) => {
+            if (node.nodeType === 1 && 
+               (node.innerHTML.includes('mpl-canvas') || node.classList.contains('ui-dialog'))) {
+                
+                // Only act if we have a valid, CURRENTLY active canvas window
+                if (window.lastActiveCanvas && document.body.contains(window.lastActiveCanvas)) {
+                    const targetWindow = window.lastActiveCanvas.parentElement;
+                    
+                    // 1. GHOST PREVENTION: Clear everything including previous plot wrappers
+                    targetWindow.innerHTML = ''; 
+                    
+                    // 2. Hide the Matplotlib internal UI chrome
+                    const titleBar = node.querySelector('.ui-dialog-titlebar');
+                    if (titleBar) titleBar.style.display = 'none';
+
+                    const contentWrapper = node.querySelector('.ui-dialog-content') || node;
+                    contentWrapper.style.border = 'none';
+                    contentWrapper.style.padding = '0';
+
+                    // 3. Dock the new node
+                    targetWindow.appendChild(node);
+                    
+                    // 4. Reset display for the docked node
+                    node.style.position = 'relative'; // Stop it from 'floating' over the OS
+                    node.style.top = '0';
+                    node.style.left = '0';
+                    node.style.width = '100%';
+                    node.style.height = '100%';
+
+                    console.log("OS: Captured plot for Window ID:", window.lastActiveCanvas.id);
+                } else {
+                    // If no active window, remove the floating "Ghost" immediately
+                    console.warn("OS: Intercepted orphan plot, exorcising ghost...");
+                    node.remove(); 
+                }
+            }
+        });
+    });
+});
+
+plotObserver.observe(document.body, { childList: true });
+
+
+window.direct_video_launch = (filePath) => {
+    // We use the FS directly in JS to get the file and create a URL
+    const data = pyodide.FS.readFile(filePath);
+    const blob = new Blob([data], { type: 'video/mp4' });
+    const url = URL.createObjectURL(blob);
+    
+    const html = `
+        <div style="background:#000; height:100%; display:flex; flex-direction:column;">
+            <video controls autoplay style="width:100%; flex-grow:1;">
+                <source src="${url}" type="video/mp4">
+            </video>
+        </div>
+    `;
+
+    // Trigger your existing WindowManager
+    new WindowManager("Ox-Player", 150, 150, html, (winEl, id) => {
+        console.log("Video launched via direct JS bridge");
+    });
+};
+
+
+window.launch_ox_browser = (initialUrl) => {
+    const id = `browser-${Date.now()}`;
+    
+    // THE FIX: Destroys and recreates the iframe to bypass the navigation freeze
+    window[`nav_${id}`] = () => {
+        const input = document.getElementById(`${id}-input`);
+        const container = document.getElementById(`${id}-frame-container`);
+        let url = input.value.trim();
+        
+        if (!url) return;
+        if (!url.startsWith('http')) url = 'https://' + url;
+        
+        console.log(`Ox-Browser [${id}] forcing new load: ${url}`);
+        
+        // Wipe the container and inject a fresh frame
+        container.innerHTML = `
+            <iframe id="${id}-frame" src="${url}" 
+                    style="width:100%; height:100%; border:none; background:#fff;" 
+                    sandbox="allow-scripts allow-same-origin allow-forms">
+            </iframe>
+        `;
+    };
+
+    const html = `
+        <div id="${id}" style="height:100%; display:flex; flex-direction:column; background:#1a1a1a;">
+            <div style="background:#2d2d2d; padding:8px; display:flex; gap:10px; align-items:center; border-bottom:1px solid #444;">
+                <div style="display:flex; gap:15px; color:#aaa; padding:0 10px;">
+                    <i class="fa-solid fa-house" style="cursor:pointer;" onclick="document.getElementById('${id}-input').value='wikipedia.org'; window['nav_${id}']();"></i>
+                    <i class="fa-solid fa-rotate-right" style="cursor:pointer;" onclick="window['nav_${id}']()"></i>
+                </div>
+                
+                <div style="flex-grow:1; display:flex; background:#111; border:1px solid #444; border-radius:20px; padding:2px 10px; align-items:center;">
+                    <input type="text" id="${id}-input" value="${initialUrl}" 
+                           style="width:100%; background:transparent; color:#0f0; border:none; padding:2px 5px; font-family:monospace; font-size:11px; outline:none;"
+                           onkeydown="if(event.key === 'Enter') window['nav_${id}']()">
+                    <i class="fa-solid fa-paper-plane" 
+                       style="color:#5bc0de; cursor:pointer; padding:0 5px;" 
+                       onclick="window['nav_${id}']()"></i>
+                </div>
+            </div>
+
+            <div id="${id}-frame-container" style="flex-grow:1; background:#fff;">
+                <iframe id="${id}-frame" src="${initialUrl.startsWith('http') ? initialUrl : 'https://' + initialUrl}" 
+                        style="width:100%; height:100%; border:none; background:#fff;" 
+                        sandbox="allow-scripts allow-same-origin allow-forms">
+                </iframe>
+            </div>
+        </div>
+    `;
+
+    new WindowManager("Ox-Browser", 100, 100, html, (winEl, id) => {
+        console.log(`Ox-Browser: Session ${id} active.`);
+    });
+};
+
+// --- UPDATED WINDOW MANAGER ---
+class WindowManager {
+    constructor(title, x, y, contentHTML, onReady = null) {
+        this.id = windowIdCounter++;
+        this.title = title;
+        
+        // 1. Create DOM Window
+        this.el = document.createElement('div');
+        this.el.className = 'window';
+        this.el.style.left = x + 'px';
+        this.el.style.top = y + 'px';
+        this.el.style.zIndex = zIndexCounter++;
+
+        const processedHTML = contentHTML.replace(/{ID}/g, this.id);
+
+        this.el.innerHTML = `
+            <div class="titlebar" id="title-${this.id}">
+                <span>${this.title}</span>
+                <div>
+                <button class="close-btn" id="close-${this.id}">×</button>
+                </div>
+            </div>
+            <div class="content">${processedHTML}</div>
+            <div class="window-resizer"></div>
+        `;
+
+
+        // IMPORTANT: Append to the specific windows layer
+        document.getElementById('desktop-windows').appendChild(this.el);
+        
+        // 2. Setup Interactions
+        this.setupDragging();
+        
+        // Bring to front on any click within the window
+        this.el.addEventListener('mousedown', (e) => {
+            this.focus();
+        });
+
+
+        // Close button logic - using stopPropagation to prevent the window from "focusing" while closing
+        const closeBtn = this.el.querySelector(`#close-${this.id}`);
+        closeBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this.close();
+        });
+
+        
+        // 3. Register to Taskbar
+        this.createTaskbarItem();
+        this.focus();
+
+        // At the bottom of the constructor, call the new setup:
+        this.setupResizing();
+
+        // 4. Callback for App initialization
+        if (onReady) onReady(this.el, this.id);
+    }
+
+hide() {
+    // 1. Physically hide the element
+    this.el.style.display = 'none';
+    
+    // 2. Update the taskbar item style to show it's minimized
+    const tbItem = document.getElementById(`tb-${this.id}`);
+    if (tbItem) {
+        tbItem.style.borderBottom = "none";
+        tbItem.style.opacity = "0.6";
+        tbItem.classList.remove('active-task');
+    }
+}
+
+show() {
+    // 1. Bring the element back to the layout
+    this.el.style.display = 'flex';
+    
+    // 2. Update taskbar to show it's active again
+    const tbItem = document.getElementById(`tb-${this.id}`);
+    if (tbItem) {
+        tbItem.style.borderBottom = "2px solid #4f81d2";
+        tbItem.style.opacity = "1";
+        tbItem.classList.add('active-task');
+    }
+    
+    // 3. Trigger your existing focus logic
+    this.focus();
+}
+
+    focus() {
+        zIndexCounter++;
+        this.el.style.zIndex = zIndexCounter;
+        AppRegistry.activeWindowId = this.id;
+        
+        // Update taskbar visuals
+        document.querySelectorAll('.taskbar-item').forEach(btn => btn.classList.remove('active'));
+        const tbItem = document.getElementById(`tb-${this.id}`);
+        if (tbItem) tbItem.classList.add('active');
+    }
+
+    close() {
+        this.el.remove();
+        const tbItem = document.getElementById(`tb-${this.id}`);
+        if (tbItem) tbItem.remove();
+    }
+
+
+
+    createTaskbarItem() {
+        const tb = document.getElementById('taskbar-apps');
+        const btn = document.createElement('div');
+        btn.id = `tb-${this.id}`;
+        btn.className = 'taskbar-item';
+        btn.innerText = this.title;
+        //btn.onclick = () => this.focus();
+btn.onclick = () => {
+    // If it's hidden, the user wants it back.
+    if (this.el.style.display === 'none') {
+        this.show();
+    } 
+    // If it's visible but NOT the active window, just bring it to front.
+    else if (AppRegistry.activeWindowId !== this.id) {
+        this.focus();
+    }
+    // If it's visible AND it's already the active window, hide it (the Windows/Linux behavior).
+    else {
+        this.hide();
+    }
+};     
+        tb.appendChild(btn);
+    }
+
+setupDragging() {
+    const titlebar = this.el.querySelector('.titlebar');
+    
+    titlebar.addEventListener('pointerdown', (e) => {
+        // Ignore if clicking the close button or using a non-left mouse click
+        if (e.target.classList.contains('close-btn')) return;
+        if (e.button !== 0 && e.pointerType === 'mouse') return;
+        
+        this.focus();
+        
+        // Capture the pointer so movement is tracked even if the finger/cursor 
+        // leaves the titlebar bounds during a fast drag.
+        titlebar.setPointerCapture(e.pointerId);
+
+        let lastX = e.clientX;
+        let lastY = e.clientY;
+
+        const onPointerMove = (moveEvent) => {
+            const deltaX = moveEvent.clientX - lastX;
+            const deltaY = moveEvent.clientY - lastY;
+
+            let newLeft = this.el.offsetLeft + deltaX;
+            let newTop = this.el.offsetTop + deltaY;
+
+            // Maintain your top boundary check (prevents dragging titlebar off-screen)
+            if (newTop < 0) newTop = 0;
+
+            this.el.style.left = newLeft + 'px';
+            this.el.style.top = newTop + 'px';
+
+            lastX = moveEvent.clientX;
+            lastY = moveEvent.clientY;
+        };
+
+        const onPointerUp = (upEvent) => {
+            titlebar.releasePointerCapture(upEvent.pointerId);
+            titlebar.removeEventListener('pointermove', onPointerMove);
+            titlebar.removeEventListener('pointerup', onPointerUp);
+            titlebar.removeEventListener('pointercancel', onPointerUp);
+        };
+
+        titlebar.addEventListener('pointermove', onPointerMove);
+        titlebar.addEventListener('pointerup', onPointerUp);
+        titlebar.addEventListener('pointercancel', onPointerUp);
+        
+        // Block default touch actions like scrolling while dragging
+        e.preventDefault();
+    });
+}
+
+setupResizing() {
+    const resizer = this.el.querySelector('.window-resizer');
+    
+    resizer.addEventListener('pointerdown', (e) => {
+        e.preventDefault();
+        e.stopPropagation(); // Don't trigger window focus/drag logic
+        
+        this.focus();
+        resizer.setPointerCapture(e.pointerId);
+
+        let startWidth = this.el.offsetWidth;
+        let startHeight = this.el.offsetHeight;
+        let startX = e.clientX;
+        let startY = e.clientY;
+
+        const onPointerMove = (moveEvent) => {
+            const deltaX = moveEvent.clientX - startX;
+            const deltaY = moveEvent.clientY - startY;
+
+            // Update dimensions
+            const newWidth = startWidth + deltaX;
+            const newHeight = startHeight + deltaY;
+
+            // Enforce minimums (matching your CSS)
+            if (newWidth > 250) this.el.style.width = newWidth + 'px';
+            if (newHeight > 150) this.el.style.height = newHeight + 'px';
+        };
+
+        const onPointerUp = (upEvent) => {
+            resizer.releasePointerCapture(upEvent.pointerId);
+            document.removeEventListener('pointermove', onPointerMove);
+            document.removeEventListener('pointerup', onPointerUp);
+        };
+
+        document.addEventListener('pointermove', onPointerMove);
+        document.addEventListener('pointerup', onPointerUp);
+    });
+}
+
+}
+
+// --- THE OVERRIDE ---
+// This stops the browser's "Inspect Element / Save As" menu from appearing 
+// anywhere on the desktop, allowing our custom menu to be the only one.
+// Helper: show/hide items based on what was right-clicked
+function applyMenuMode(mode) {
+    const hasPaste = !!(osClipboard && osClipboard.path);
+    const show = (id) => document.getElementById(id).style.display = 'flex';
+    const hide = (id) => document.getElementById(id).style.display = 'none';
+    const sep  = (id, v) => document.getElementById(id).style.display = v ? 'block' : 'none';
+
+    if (mode === 'file') {
+        show('ctx-open'); show('ctx-rename'); show('ctx-copy');
+        hide('ctx-new-file'); hide('ctx-new-folder');
+        document.getElementById('ctx-paste').style.display = hasPaste ? 'flex' : 'none';
+        show('ctx-delete');
+        sep('ctx-sep-1', true); sep('ctx-sep-2', true);
+    } else { // 'space'
+        hide('ctx-open'); hide('ctx-rename'); hide('ctx-copy');
+        show('ctx-new-file'); show('ctx-new-folder');
+        document.getElementById('ctx-paste').style.display = hasPaste ? 'flex' : 'none';
+        hide('ctx-delete');
+        sep('ctx-sep-1', false); sep('ctx-sep-2', hasPaste);
+    }
+}
+
+function positionAndShowMenu(e) {
+    const menu = document.getElementById('context-menu');
+    menu.style.left    = Math.min(e.clientX, window.innerWidth  - 174) + 'px';
+    menu.style.top     = Math.min(e.clientY, window.innerHeight - 260) + 'px';
+    menu.style.zIndex  = 999999999;
+    menu.style.display = 'block';
+}
+
+function hideMenu() { document.getElementById('context-menu').style.display = 'none'; }
+
+// Global: suppress browser menu everywhere; show custom menu for empty explorer space.
+// File-item right-clicks call e.stopPropagation() so this is NOT reached for those.
+window.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    const explorerEl = e.target.closest('.explorer-container');
+    if (!explorerEl) return; // outside an explorer → just suppress
+    const id = explorerEl.id.replace('exp-out-', '');
+    applyMenuMode('space');
+    positionAndShowMenu(e);
+    document.getElementById('ctx-new-file').onclick   = () => { hideMenu(); AppRegistry.createItem(id, 'file'); };
+    document.getElementById('ctx-new-folder').onclick = () => { hideMenu(); AppRegistry.createItem(id, 'folder'); };
+    document.getElementById('ctx-paste').onclick      = () => { AppRegistry.pasteItem(id); hideMenu(); };
+}, false);
+
+window.addEventListener('mousedown', (e) => {
+    if (!document.getElementById('context-menu').contains(e.target)) hideMenu();
+});
+
+// Also, close the menu if the user clicks anywhere else on the desktop
+window.addEventListener('mousedown', (e) => {
+    const ctx = document.getElementById('context-menu');
+
+    if (!ctx.contains(e.target)) {
+        ctx.style.display = 'none';
+    }
+});
+
+
+// ═══════════════════════════════════════════════════════
+//  SHELL ENGINE  —  Parser, Helpers & Built-in Commands
+// ═══════════════════════════════════════════════════════
+
+function shellParseLine(raw) {
+    const tokens = [];
+    let cur = '', inQ = false, qChar = '';
+    for (const c of raw) {
+        if (inQ)                       { c === qChar ? (inQ = false) : (cur += c); }
+        else if (c === '"' || c === "'") { inQ = true; qChar = c; }
+        else if (c === ' ')             { if (cur) { tokens.push(cur); cur = ''; } }
+        else                            { cur += c; }
+    }
+    if (cur) tokens.push(cur);
+
+    const cmd = tokens[0] || '';
+    const flags = new Set();
+    const args  = [];
+
+    for (let i = 1; i < tokens.length; i++) {
+        const t = tokens[i];
+        // treat -123 as a numeric arg, not a flag
+        if (t.startsWith('-') && t.length > 1 && !/^-\d/.test(t)) {
+            t.slice(1).split('').forEach(f => flags.add(f));
+        } else {
+            args.push(t);
+        }
+    }
+    // tokens[1..] kept raw for commands that need full control (find, grep)
+    return { cmd, flags, args, tokens: tokens.slice(1), raw };
+}
+
+function expandPath(p) {
+    if (!p || p === '~')   return MOUNT_POINT;
+    if (p.startsWith('~/')) return MOUNT_POINT + p.slice(1);
+    if (!p.startsWith('/')) {
+        const cwd = pyodide ? pyodide.FS.cwd() : MOUNT_POINT;
+        return (cwd === '/' ? '' : cwd) + '/' + p;
+    }
+    return p;
+}
+
+function fmtBytes(b) {
+    if (b < 1024)    return b + 'B';
+    if (b < 1048576) return (b / 1024).toFixed(1) + 'K';
+    return (b / 1048576).toFixed(1) + 'M';
+}
+
+function fmtMtime(ts) {
+    return new Date(ts * 1000).toLocaleString('en-US', {
+        month: 'short', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', hour12: false
+    });
+}
+
+// Reads from piped stdin OR a file arg — used by stdin-aware commands
+function readContent(parsed, argIdx = 0) {
+    if (parsed.stdin != null && !parsed.args[argIdx]) return parsed.stdin;
+    if (!parsed.args[argIdx]) throw new Error('missing file operand');
+    return pyodide.FS.readFile(expandPath(parsed.args[argIdx]), { encoding: 'utf8' });
+}
+
+const ShellBuiltins = {
+
+    ls({ flags, args }) {
+        const path  = expandPath(args[0]);
+        const all   = flags.has('a');
+        const long  = flags.has('l');
+        const human = flags.has('h');
+        const recur = flags.has('R');
+
+        const listOne = (dir) => {
+            let entries;
+            try { entries = pyodide.FS.readdir(dir); }
+            catch(e) { return `ls: cannot access '${dir}': ${e.message}\n`; }
+
+            if (!all) entries = entries.filter(e => !e.startsWith('.'));
+            entries = entries.filter(e => e !== '.' && e !== '..');
+
+            let out = recur ? `${dir}:\n` : '';
+
+            if (long) {
+                entries.forEach(name => {
+                    const fp = (dir === '/' ? '' : dir) + '/' + name;
+                    try {
+                        const st    = pyodide.FS.stat(fp);
+                        const isDir = pyodide.FS.isDir(st.mode);
+                        const type  = isDir ? 'd' : '-';
+                        const size  = (human ? fmtBytes(st.size) : String(st.size)).padStart(human ? 6 : 10);
+                        const date  = fmtMtime(st.mtime);
+                        out += `${type}rwxr-xr-x  ${size}  ${date}  ${name}\n`;
+                    } catch { out += `??????????           ??:??  ${name}\n`; }
+                });
+            } else {
+                out += entries.join('   ') + '\n';
+            }
+
+            if (recur) {
+                entries.forEach(name => {
+                    const fp = (dir === '/' ? '' : dir) + '/' + name;
+                    try {
+                        if (pyodide.FS.isDir(pyodide.FS.stat(fp).mode))
+                            out += '\n' + listOne(fp);
+                    } catch {}
+                });
+            }
+            return out;
+        };
+
+        return listOne(path).trimEnd();
+    },
+
+    cd({ args }) {
+        const target = expandPath(args[0] || '~');
+        try   { pyodide.FS.chdir(target); }
+        catch { return `cd: ${args[0] || '~'}: No such file or directory`; }
+        return '';
+    },
+
+    pwd() { return pyodide.FS.cwd(); },
+
+    mkdir({ flags, args }) {
+        if (!args.length) return 'mkdir: missing operand';
+        const mkp = flags.has('p');
+        const errs = [];
+        args.forEach(p => {
+            const target = expandPath(p);
+            try {
+                if (mkp) {
+                    const parts = target.split('/').filter(Boolean);
+                    let built = '';
+                    parts.forEach(part => {
+                        built += '/' + part;
+                        if (!pyodide.FS.analyzePath(built).exists) pyodide.FS.mkdir(built);
+                    });
+                } else {
+                    pyodide.FS.mkdir(target);
+                }
+            } catch(e) { errs.push(`mkdir: cannot create '${p}': ${e.message}`); }
+        });
+        return errs.join('\n');
+    },
+
+    touch({ args }) {
+        if (!args.length) return 'touch: missing file operand';
+        args.forEach(p => {
+            const t = expandPath(p);
+            if (!pyodide.FS.analyzePath(t).exists) pyodide.FS.writeFile(t, '');
+        });
+        return '';
+    },
+
+    rm({ flags, args }) {
+        if (!args.length) return 'rm: missing operand';
+        const rec  = flags.has('r') || flags.has('R');
+        const force= flags.has('f');
+        const errs = [];
+
+        const removeRec = (p) => {
+            try {
+                const st = pyodide.FS.stat(p);
+                if (pyodide.FS.isDir(st.mode)) {
+                    if (!rec) { errs.push(`rm: '${p}': is a directory`); return; }
+                    pyodide.FS.readdir(p)
+                        .filter(e => e !== '.' && e !== '..')
+                        .forEach(e => removeRec((p === '/' ? '' : p) + '/' + e));
+                    pyodide.FS.rmdir(p);
+                } else {
+                    pyodide.FS.unlink(p);
+                }
+            } catch(e) { if (!force) errs.push(`rm: '${p}': ${e.message}`); }
+        };
+
+        args.forEach(p => removeRec(expandPath(p)));
+        return errs.join('\n');
+    },
+
+    cp({ flags, args }) {
+        if (args.length < 2) return 'cp: missing destination operand';
+        const rec = flags.has('r') || flags.has('R');
+
+        const copyRec = (src, dst) => {
+            const st = pyodide.FS.stat(src);
+            if (pyodide.FS.isDir(st.mode)) {
+                if (!rec) throw new Error(`'${src}' is a directory (use -r)`);
+                if (!pyodide.FS.analyzePath(dst).exists) pyodide.FS.mkdir(dst);
+                pyodide.FS.readdir(src)
+                    .filter(e => e !== '.' && e !== '..')
+                    .forEach(e => copyRec(src + '/' + e, dst + '/' + e));
+            } else {
+                pyodide.FS.writeFile(dst, pyodide.FS.readFile(src));
+            }
+        };
+
+        try { copyRec(expandPath(args[0]), expandPath(args[1])); }
+        catch(e) { return `cp: ${e.message}`; }
+        return '';
+    },
+
+    mv({ args }) {
+        if (args.length < 2) return 'mv: missing destination operand';
+        try   { pyodide.FS.rename(expandPath(args[0]), expandPath(args[1])); }
+        catch(e) { return `mv: ${e.message}`; }
+        return '';
+    },
+
+    cat(parsed) {
+        try {
+            if (parsed.stdin != null && !parsed.args.length) return parsed.stdin;
+            if (!parsed.args.length) return 'cat: missing file operand';
+            return parsed.args.map(p => pyodide.FS.readFile(expandPath(p), { encoding: 'utf8' })).join('\n');
+        } catch(e) { return `cat: ${e.message}`; }
+    },
+
+    head(parsed) {
+        let count = 10, fileArgs = [...parsed.args];
+        if (parsed.flags.has('n') && fileArgs.length && /^\d+$/.test(fileArgs[0]))
+            count = parseInt(fileArgs.shift());
+        try {
+            return readContent({ ...parsed, args: fileArgs }, 0)
+                .split('\n').slice(0, count).join('\n');
+        } catch(e) { return `head: ${e.message}`; }
+    },
+
+    tail(parsed) {
+        let count = 10, fileArgs = [...parsed.args];
+        if (parsed.flags.has('n') && fileArgs.length && /^\d+$/.test(fileArgs[0]))
+            count = parseInt(fileArgs.shift());
+        try {
+            return readContent({ ...parsed, args: fileArgs }, 0)
+                .split('\n').slice(-count).join('\n');
+        } catch(e) { return `tail: ${e.message}`; }
+    },
+
+    echo({ raw }) { return raw.replace(/^echo\s?/, ''); },
+
+    grep(parsed) {
+        const { flags, tokens } = parsed;
+        const positional = tokens.filter(t => !t.startsWith('-'));
+        if (!positional.length) return 'grep: missing pattern';
+        const hasPipe = parsed.stdin != null;
+        if (!hasPipe && positional.length < 2) return 'grep: usage: grep [flags] pattern file';
+        const pattern = positional[0];
+        const icase  = flags.has('i');
+        const numLn  = flags.has('n');
+        const invert = flags.has('v');
+        const count  = flags.has('c');
+        try {
+            const content = (hasPipe && positional.length < 2)
+                ? parsed.stdin
+                : pyodide.FS.readFile(expandPath(positional[1]), { encoding: 'utf8' });
+            const re = new RegExp(pattern, icase ? 'i' : '');
+            const matched = content.split('\n')
+                .map((line, i) => ({ line, n: i + 1, hit: re.test(line) }))
+                .filter(({ hit }) => invert ? !hit : hit);
+            if (count) return String(matched.length);
+            return matched.map(({ line, n }) => numLn ? `${n}:\t${line}` : line).join('\n');
+        } catch(e) { return `grep: ${e.message}`; }
+    },
+
+    wc(parsed) {
+        try {
+            const content = readContent(parsed, 0);
+            const lines = (content.match(/\n/g) || []).length;
+            const words = content.trim().split(/\s+/).filter(Boolean).length;
+            const chars = content.length;
+            if (parsed.flags.has('l')) return String(lines);
+            if (parsed.flags.has('w')) return String(words);
+            if (parsed.flags.has('c')) return String(chars);
+            return `  ${lines}  ${words}  ${chars}${parsed.args[0] ? '  ' + parsed.args[0] : ''}`;
+        } catch(e) { return `wc: ${e.message}`; }
+    },
+
+    find({ tokens }) {
+        // find [path] [-name glob] [-type f|d]
+        let root = '.', nameGlob = null, typeFilter = null;
+        for (let i = 0; i < tokens.length; i++) {
+            if      (tokens[i] === '-name' && i + 1 < tokens.length) nameGlob   = tokens[++i];
+            else if (tokens[i] === '-type' && i + 1 < tokens.length) typeFilter = tokens[++i];
+            else if (!tokens[i].startsWith('-'))                       root        = tokens[i];
+        }
+        const nameRe = nameGlob
+            ? new RegExp('^' + nameGlob.replace(/\./g,'\\.').replace(/\*/g,'.*').replace(/\?/g,'.') + '$')
+            : null;
+        const results = [];
+        const walk = (p) => {
+            try {
+                const st    = pyodide.FS.stat(p);
+                const isDir = pyodide.FS.isDir(st.mode);
+                const name  = p.split('/').pop();
+                const okName = !nameRe || nameRe.test(name);
+                const okType = !typeFilter || (typeFilter === 'd' ? isDir : !isDir);
+                if (okName && okType) results.push(p);
+                if (isDir) pyodide.FS.readdir(p)
+                    .filter(e => e !== '.' && e !== '..')
+                    .forEach(e => walk((p === '/' ? '' : p) + '/' + e));
+            } catch {}
+        };
+        walk(expandPath(root));
+        return results.join('\n') || '(no results)';
+    },
+
+    sort(parsed) {
+        try {
+            const lines = readContent(parsed, 0).split('\n').filter(Boolean);
+            const rev = parsed.flags.has('r'), num = parsed.flags.has('n');
+            lines.sort((a, b) => {
+                const cmp = num ? parseFloat(a) - parseFloat(b) : a.localeCompare(b);
+                return rev ? -cmp : cmp;
+            });
+            return lines.join('\n');
+        } catch(e) { return `sort: ${e.message}`; }
+    },
+
+    uniq(parsed) {
+        try {
+            const lines = readContent(parsed, 0).split('\n');
+            return lines.filter((l, i) => i === 0 || l !== lines[i - 1]).join('\n');
+        } catch(e) { return `uniq: ${e.message}`; }
+    },
+
+    diff({ args }) {
+        if (args.length < 2) return 'diff: need two file operands';
+        try {
+            const a = pyodide.FS.readFile(expandPath(args[0]), { encoding: 'utf8' }).split('\n');
+            const b = pyodide.FS.readFile(expandPath(args[1]), { encoding: 'utf8' }).split('\n');
+            const out = [];
+            for (let i = 0; i < Math.max(a.length, b.length); i++) {
+                if (a[i] !== b[i]) {
+                    if (a[i] !== undefined) out.push(`< ${a[i]}`);
+                    if (b[i] !== undefined) out.push(`> ${b[i]}`);
+                }
+            }
+            return out.length ? out.join('\n') : '(files are identical)';
+        } catch(e) { return `diff: ${e.message}`; }
+    },
+
+    stat({ args }) {
+        if (!args.length) return 'stat: missing operand';
+        try {
+            const p  = expandPath(args[0]);
+            const st = pyodide.FS.stat(p);
+            const isDir = pyodide.FS.isDir(st.mode);
+            return [
+                `  File: ${p}`,
+                `  Size: ${st.size} bytes (${fmtBytes(st.size)})`,
+                `  Type: ${isDir ? 'directory' : 'regular file'}`,
+                ` Inode: ${st.ino}`,
+                `Modify: ${fmtMtime(st.mtime)}`,
+            ].join('\n');
+        } catch(e) { return `stat: ${e.message}`; }
+    },
+
+    df() {
+        return [
+            'Filesystem          Size   Avail  Mounted on',
+            `IDBFS (IndexedDB)   ∞      ∞      ${MOUNT_POINT}`,
+        ].join('\n');
+    },
+
+    env() {
+        return [
+            `USER=${currentUser}`,
+            `HOME=${MOUNT_POINT}`,
+            `PWD=${pyodide ? pyodide.FS.cwd() : MOUNT_POINT}`,
+            `SHELL=/bin/oxsh`,
+            `TERM=xterm-color`,
+            `OS=OxPy-WDE 0.0.1`,
+        ].join('\n');
+    },
+
+    uname({ flags }) {
+        if (flags.has('a')) return 'OxPy-WDE 0.0.1 WASM-Kernel #1 SMP CPython x86_64 GNU/Linux';
+        if (flags.has('r')) return '0.0.1-WASM';
+        if (flags.has('m')) return 'x86_64';
+        return 'OxPy-WDE';
+    },
+
+    date()     { return new Date().toString(); },
+    whoami()   { return currentUser; },
+    hostname() { return 'oxpy-wde'; },
+
+    clibs({ args }) {
+        const sub = args[0];
+        const LIBS_PATH = `${MOUNT_POINT}/clibs`;
+        if (sub === 'install') {
+            (window.systemLog || console.log)('CC: Forcing C header reinstall...');
+            bootstrapCToolchain(true);
+            return '';
+        }
+        if (sub === 'status') {
+            if (!pyodide.FS.analyzePath(LIBS_PATH).exists)
+                return `clibs: NOT installed (run: clibs install)`;
+            const count = (function walk(p) {
+                return pyodide.FS.readdir(p)
+                    .filter(e => e !== '.' && e !== '..')
+                    .reduce((n, e) => {
+                        const fp = `${p}/${e}`;
+                        return n + (pyodide.FS.isDir(pyodide.FS.stat(fp).mode) ? walk(fp) : 1);
+                    }, 0);
+            })(LIBS_PATH);
+            return `clibs: installed at ${LIBS_PATH} (${count} files)`;
+        }
+        return 'Usage: clibs status | clibs install';
+    },
+
+async tcc({ args, raw }) {
+    if (!tccInstance) return "Error: TCC engine not loaded.";
+
+    // 1. Setup internal paths
+    const internalArgs = [
+        '-I/usr/local/lib/tcc/include', 
+        '-target', 'wasm32', 
+        '-nostdlib', 
+        '-ffreestanding'
+    ];
+
+    try {
+        // 2. Automated File Mapping
+        const processedArgs = args.map(arg => {
+            // If the argument looks like a path to a source file
+            if (arg.endsWith('.c') || arg.endsWith('.h')) {
+                const fullPath = expandPath(arg); // Get the absolute Pyodide path
+                const content = pyodide.FS.readFile(fullPath);
+                
+                // Mirror the file into TCC's virtual filesystem at the SAME path
+                const dir = fullPath.substring(0, fullPath.lastIndexOf('/'));
+                try { tccInstance.FS.mkdirTree(dir); } catch(e) {}
+                tccInstance.FS.writeFile(fullPath, content);
+                
+                return fullPath; 
+            }
+            return arg;
+        });
+
+        // 3. Run Compiler
+        tccInstance.callMain([...internalArgs, ...processedArgs]);
+
+        // 4. Ghost Retrieval (Sync Output)
+        const outIdx = args.indexOf('-o');
+        if (outIdx !== -1 && args[outIdx + 1]) {
+            const outPath = expandPath(args[outIdx + 1]);
+            const wasmBytes = tccInstance.FS.readFile(outPath);
+            pyodide.FS.writeFile(outPath, wasmBytes);
+            return `Success: Compiled to ${outPath}`;
+        }
+
+        return "Compilation finished.";
+    } catch (e) {
+        return `TCC Process Exit.`;
+    }
+},
+
+async opcc({ args, raw }) {
+    if (!tccInstance) return "Error: TCC engine not loaded.";
+    if (!pyodide) return "Error: Pyodide kernel not ready.";
+
+    const sourceArg = args.find(a => a.endsWith('.c'));
+    if (!sourceArg) return "opcc: no input .c files";
+
+    const objName = sourceArg.replace(/\.c$/, '.o');
+    const wasmName = args.includes('-o') 
+        ? args[args.indexOf('-o') + 1] 
+        : sourceArg.replace(/\.c$/, '.wasm');
+
+    const fullSourcePath = expandPath(sourceArg);
+    const fullObjPath = expandPath(objName);
+    const fullWasmPath = expandPath(wasmName);
+    const clibInclude = `${MOUNT_POINT}/clibs/include`;
+
+    try {
+        // 1. FLATTEN & FORCE HEADERS
+        // We clear the internal TCC include dir and force-feed your clibs
+        const tccIncDir = '/usr/local/lib/tcc/include';
+        try { tccInstance.FS.mkdirTree(tccIncDir); } catch(e) {}
+
+        // Copy all headers from your clibs into the TCC sandbox
+// Inside the header-copying loop of opcc:
+const headers = pyodide.FS.readdir(clibInclude);
+for (const h of headers) {
+    if (h.endsWith('.h')) {
+        let content = pyodide.FS.readFile(`${clibInclude}/${h}`, { encoding: 'utf8' });
+        
+        // Remove include_next and self-references that confuse the preprocessor
+        if (content.includes('include_next') || content.includes(`#include <${h}>`)) {
+            content = content.replace(/#include_next\s+<.*>/g, '/* stripped include_next */');
+            content = content.replace(new RegExp(`#include\\s+<${h}>`, 'g'), `/* stripped self-include */`);
+        }
+
+        tccInstance.FS.writeFile(`${tccIncDir}/${h}`, content);
+    }
+}
+
+        // 2. MIRROR LOCAL PROJECT FILES
+        for (const arg of args) {
+            if (arg.endsWith('.c') || arg.endsWith('.h')) {
+                const path = expandPath(arg);
+                const content = pyodide.FS.readFile(path);
+                const dir = path.substring(0, path.lastIndexOf('/'));
+                if (dir) { try { tccInstance.FS.mkdirTree(dir); } catch(e) {} }
+                tccInstance.FS.writeFile(path, content);
+            }
+        }
+
+        // 3. TCC EXECUTION (The "Clean" Pass)
+        // We only point to ONE include path to prevent circular recursion
+        const tccFlags = [
+            `-I${tccIncDir}`,
+            '-nostdlib',
+            '-ffreestanding',
+            '-c',
+            fullSourcePath,
+            '-o',
+            fullObjPath
+        ];
+        tccInstance.callMain(tccFlags);
+
+        // 4. BRIDGE DATA
+        const objBytes = tccInstance.FS.readFile(fullObjPath);
+        pyodide.FS.writeFile(fullObjPath, objBytes);
+
+        // 5. PPCI BACKEND (Your Working Logic)
+        const nBytes = await pyodide.runPythonAsync(`
+import sys, os
+from types import ModuleType
+if 'cgitb' not in sys.modules:
+    m = ModuleType('cgitb'); m.enable = lambda **k: None; sys.modules['cgitb'] = m
+
+from ppci.wasm.arch import WasmArchitecture
+from ppci.lang.c.api import CBuilder, COptions
+from ppci.wasm import ir_to_wasm
+
+class _E: LITTLE = 1
+arch = WasmArchitecture()
+arch.get_size = lambda t: 4
+arch.get_alignment = lambda t: 4
+arch.endianness = _E.LITTLE
+
+opts = COptions()
+inc_root = r"${clibInclude}"
+if os.path.exists(inc_root):
+    opts.add_include_path(inc_root)
+    for root, dirs, _ in os.walk(inc_root):
+        for d in dirs:
+            opts.add_include_path(os.path.join(root, d))
+
+def _patch(b):
+    b = bytearray(b)
+    def rl(p):
+        r, s, n = 0, 0, 0
+        while True:
+            x = b[p + n]; r |= (x & 0x7f) << s; s += 7; n += 1
+            if not (x & 0x80): break
+        return r, n
+    def el(v):
+        o = bytearray()
+        while True:
+            byt = v & 0x7f; v >>= 7
+            if v: byt |= 0x80
+            o.append(byt)
+            if not v: break
+        return bytes(o)
+    def reparse(buf):
+        p, sc = 8, {}
+        while p < len(buf):
+            sid, hp = buf[p], p; p += 1
+            sz, n = rl(p); p += n; sc[sid] = (hp, p, sz); p += sz
+        return sc
+    def first_after(buf, sc, after_id):
+        for sid in range(after_id + 1, 12):
+            if sid in sc: return sc[sid][0]
+        return len(buf)
+    sc = reparse(b)
+    hm, hme = 5 in sc, False
+    if 7 in sc:
+        _, cp, sz = sc[7]; ep = cp
+        cnt, n = rl(ep); ep += n
+        for _ in range(cnt):
+            nl, n = rl(ep); ep += n + nl
+            kind = b[ep]; ep += 1
+            _, n = rl(ep); ep += n
+            if kind == 2: hme = True; break
+    mexp = bytes([6]) + b'memory' + bytes([2, 0])
+    if not hm:
+        ms = bytes([5, 3, 1, 0, 1]); ins = first_after(b, sc, 5)
+        b = b[:ins] + bytearray(ms) + b[ins:]; sc = reparse(b)
+    if not hme:
+        if 7 in sc:
+            hp, cp, sz = sc[7]; cnt, n = rl(cp); nc = el(cnt + 1)
+            body = bytes(b[cp + n : cp + sz]) + mexp
+            ns = bytes([7]) + el(len(nc) + len(body)) + nc + body
+            b = b[:hp] + bytearray(ns) + b[cp + sz:]
+        else:
+            ns = bytes([7]) + el(1 + len(mexp)) + bytes([1]) + mexp
+            ins = first_after(b, sc, 7); b = b[:ins] + bytearray(ns) + b[ins:]
+    return bytes(b)
+
+with open(r"${fullSourcePath}", "r") as f:
+    ir_mod = CBuilder(arch, opts).build(f, filename=os.path.basename(r"${fullSourcePath}"))
+
+raw = bytes(ir_to_wasm(ir_mod).to_bytes())
+wasm = _patch(raw)
+with open(r"${fullWasmPath}", "wb") as f:
+    f.write(wasm)
+len(wasm)
+        `);
+
+        pyodide.FS.syncfs(false, () => {
+            if (window.AppRegistry) AppRegistry.refreshAllExplorers();
+        });
+
+        return `opcc: Successfully bridged ${sourceArg} -> ${wasmName} (${nBytes} bytes)`;
+
+    } catch (e) {
+        return `opcc error: ${e.message || String(e)}`;
+    }
+},
+
+    help() {
+        return [
+            '┌─ Shell Built-ins ──────────────────────────────────────────┐',
+            '│  ls [-l -a -h -R]            List directory contents       │',
+            '│  cd [path]                   Change directory (~ = home)   │',
+            '│  pwd                         Print working directory        │',
+            '│  mkdir [-p] <dirs…>          Create directories            │',
+            '│  touch <files…>              Create empty files            │',
+            '│  rm [-r -f] <paths…>         Remove files/directories      │',
+            '│  cp [-r] <src> <dst>         Copy file or directory        │',
+            '│  mv <src> <dst>              Move / rename                 │',
+            '│  cat <files…>                Print file contents           │',
+            '│  head [-n count] <file>      First N lines  (default 10)  │',
+            '│  tail [-n count] <file>      Last N lines   (default 10)  │',
+            '│  echo <text>                 Print text                    │',
+            '│  grep [-i -n -v -c] <p> <f> Search file for pattern       │',
+            '│  wc [-l -w -c] <file>        Count lines / words / chars   │',
+            '│  sort [-r -n] <file>         Sort lines                    │',
+            '│  uniq <file>                 Remove consecutive duplicates  │',
+            '│  diff <a> <b>                Compare two files             │',
+            '│  stat <path>                 File metadata                 │',
+            '│  find [path] [-name g] [-type f|d]  Find files            │',
+            '│  df                          Filesystem info               │',
+            '│  env                         Environment variables         │',
+            '│  uname [-a -r -m]            System info                   │',
+            '│  date                        Current date/time             │',
+            '│  whoami / hostname           User / machine name           │',
+            '│  clear                       Clear terminal                │',
+            '│  history                     Command history               │',
+            '│  run <file.py>               Execute a Python file         │',
+            '│  cc <file.c>  Compile C to WASM (PPCI Experimental)        │',
+            '│  opcc <file.c> Compile C to WASM (TCC-O-PPCI Experimental) │',
+            '│  clibs [status|install] Check or install clibs for cc/opcc │',
+            '│  help                        This help screen              │',
+            '├────────────────────────────────────────────────────────────┤',
+            '│  Anything else runs as Python.  ↑↓ = history navigation.  │',
+            '└────────────────────────────────────────────────────────────┘',
+        ].join('\n');
+    },
+};
+
+// ═══════════════════════════════════════════════════════
+//  PIPELINE EXECUTOR  —  handles cmd | cmd | cmd chains
+// ═══════════════════════════════════════════════════════
+async function shellExecutePipeline(rawInput, { out, termLog, updatePrompt }) {
+    const segments = [];
+    let cur = '', inQ = false, qChar = '';
+    for (const c of rawInput) {
+        if (inQ) { c === qChar ? (inQ = false) : (cur += c); }
+        else if (c === '"' || c === "'") { inQ = true; qChar = c; cur += c; }
+        else if (c === '|') { segments.push(cur.trim()); cur = ''; }
+        else { cur += c; }
+    }
+    segments.push(cur.trim());
+
+    let pipeStdin = null;
+
+    for (let i = 0; i < segments.length; i++) {
+        const seg = segments[i].trim();
+        if (!seg) continue;
+        const isLast = i === segments.length - 1;
+        const parsed = shellParseLine(seg);
+        parsed.stdin = pipeStdin;
+        const { cmd } = parsed;
+        let result = '';
+
+        // --- C COMPILER (ppci — compiles entirely inside Pyodide, no worker needed) ---
+        if (cmd === 'cc' || cmd === 'gcc' || cmd === 'clang') {
+            const sourceArg = parsed.args.find(a => /\.(c|cpp|cc|cxx)$/i.test(a));
+            if (!sourceArg) {
+                termLog('Usage: cc <file.c> [-o output.wasm]');
+                return;
+            }
+
+            const fullPath = expandPath(sourceArg);
+            const oIdx     = parsed.tokens.indexOf('-o');
+            const outPath  = (oIdx >= 0 && parsed.tokens[oIdx + 1])
+                ? expandPath(parsed.tokens[oIdx + 1])
+                : fullPath.replace(/\.[^.]+$/, '') + '.wasm';
+
+            termLog(`CC: Compiling ${sourceArg}...`);
+            if (!pyodide) { termLog('CC: Kernel not ready.'); return; }
+
+            try {
+                const incRoot = `${MOUNT_POINT}/clibs/include`;
+                const nBytes  = await pyodide.runPythonAsync(`
+import sys, os
+from types import ModuleType
+
+if 'cgitb' not in sys.modules:
+    m = ModuleType('cgitb'); m.enable = lambda **k: None; sys.modules['cgitb'] = m
+
+try:
+    from ppci.wasm.arch import WasmArchitecture
+    from ppci.lang.c.api import CBuilder, COptions
+    from ppci.wasm import ir_to_wasm
+except ImportError:
+    raise ImportError(
+        "ppci not installed — fix with: import micropip; await micropip.install('ppci')"
+    )
+
+# ── Architecture shims (WasmArchitecture is experimental in ppci) ──
+class _E:
+    LITTLE = 1
+
+arch = WasmArchitecture()
+arch.get_size      = lambda t: 4
+arch.get_alignment = lambda t: 4
+arch.endianness    = _E.LITTLE
+
+# ── Build include search paths from installed clibs ──
+opts     = COptions()
+inc_root = r"${incRoot}"
+if os.path.exists(inc_root):
+    opts.add_include_path(inc_root)
+    for root, dirs, _ in os.walk(inc_root):
+        for d in dirs:
+            opts.add_include_path(os.path.join(root, d))
+
+# ── Compile C → ppci IR → WASM ──
+with open(r"${fullPath}", "r") as f:
+    ir_mod = CBuilder(arch, opts).build(f, filename=os.path.basename(r"${fullPath}"))
+
+raw = bytes(ir_to_wasm(ir_mod).to_bytes())
+
+# ── WASM binary patcher ────────────────────────────────────────────────────
+# ppci may omit the memory section entirely, or define one without exporting
+# it.  Both cases break browser instantiation.  We scan the binary, insert a
+# 1-page memory section if absent, and add/update the export section so that
+# the "memory" export (kind=2, index=0) is always present.
+def _patch(b):
+    b = bytearray(b)
+
+    def rl(p):                                  # decode unsigned LEB-128
+        r, s, n = 0, 0, 0
+        while True:
+            x = b[p + n]; r |= (x & 0x7f) << s; s += 7; n += 1
+            if not (x & 0x80): break
+        return r, n
+
+    def el(v):                                  # encode unsigned LEB-128
+        o = bytearray()
+        while True:
+            byt = v & 0x7f; v >>= 7
+            if v: byt |= 0x80
+            o.append(byt)
+            if not v: break
+        return bytes(o)
+
+    def reparse(buf):                           # section-id → (hdr_pos, content_pos, size)
+        p, sc = 8, {}
+        while p < len(buf):
+            sid, hp = buf[p], p; p += 1
+            sz, n = rl(p); p += n; sc[sid] = (hp, p, sz); p += sz
+        return sc
+
+    def first_after(buf, sc, after_id):        # correct insertion point for new section
+        for sid in range(after_id + 1, 12):
+            if sid in sc: return sc[sid][0]
+        return len(buf)
+
+    sc = reparse(b)
+    hm, hme = 5 in sc, False                   # has_memory, has_memory_export
+
+    if 7 in sc:                                 # scan export section for memory kind (=2)
+        _, cp, sz = sc[7]; ep = cp
+        cnt, n = rl(ep); ep += n
+        for _ in range(cnt):
+            nl, n = rl(ep); ep += n + nl
+            kind = b[ep]; ep += 1
+            _,   n = rl(ep); ep += n
+            if kind == 2: hme = True; break
+
+    # export entry: name_len=6, "memory", kind=2 (memory), index=0
+    mexp = bytes([6]) + b'memory' + bytes([2, 0])
+
+    if not hm:                                  # insert memory section (id=5): min=1 page
+        ms  = bytes([5, 3, 1, 0, 1])           #  id  size  count flags  min
+        ins = first_after(b, sc, 5)
+        b   = b[:ins] + bytearray(ms) + b[ins:]
+        sc  = reparse(b)
+
+    if not hme:
+        if 7 in sc:                             # patch existing export section
+            hp, cp, sz = sc[7]
+            cnt, n     = rl(cp)
+            nc         = el(cnt + 1)
+            body       = bytes(b[cp + n : cp + sz]) + mexp
+            ns         = bytes([7]) + el(len(nc) + len(body)) + nc + body
+            b          = b[:hp] + bytearray(ns) + b[cp + sz:]
+        else:                                   # create a brand-new export section
+            ns  = bytes([7]) + el(1 + len(mexp)) + bytes([1]) + mexp
+            ins = first_after(b, sc, 7)
+            b   = b[:ins] + bytearray(ns) + b[ins:]
+
+    return bytes(b)
+
+wasm = _patch(raw)
+with open(r"${outPath}", "wb") as f:
+    f.write(wasm)
+len(wasm)
+`);
+                termLog(`CC: ${outPath} (${nBytes} bytes)`);
+                pyodide.FS.syncfs(false, () => AppRegistry.refreshAllExplorers());
+            } catch(e) {
+                termLog(`CC: ${e.message || String(e)}`);
+            }
+            updatePrompt();
+            return;
+        }
+
+        if (cmd === 'clear') { if (isLast) out.textContent = ''; return; }
+        
+        if (cmd === 'run') {
+            if (!parsed.args[0]) { termLog('Usage: run <file.py>'); break; }
+            try {
+                const src = pyodide.FS.readFile(expandPath(parsed.args[0]), { encoding: 'utf8' });
+                const res = await pyodide.runPythonAsync(src);
+                result = (res != null && res !== '') ? String(res) : '';
+            } catch(e) { termLog('Error: ' + e); break; }
+        }
+        else if (ShellBuiltins[cmd]) {
+            try { result = String(ShellBuiltins[cmd](parsed) ?? ''); }
+            catch(e) { termLog(`${cmd}: ${e.message}`); break; }
+        } 
+        else {
+            // --- PYTHON FALLBACK ---
+            // This is the "danger zone" where cc was accidentally running
+            if (!pyodide) { termLog('Kernel not ready'); break; }
+            try {
+                // Double check that we aren't accidentally running 'cc' here
+                if (cmd !== 'cc') {
+                    const res = await pyodide.runPythonAsync(seg);
+                    result = (res != null && res !== '') ? String(res) : '';
+                }
+            } catch(e) { termLog('Error: ' + e); break; }
+        }
+
+        if (isLast) {
+            if (result) termLog(result);
+            updatePrompt();
+            if (pyodide) pyodide.FS.syncfs(false, () => AppRegistry.refreshAllExplorers());
+        } else {
+            pipeStdin = result;
+        }
+    }
+}
+
+
+
+        // --- APPLICATION REGISTRY ---
+        const AppRegistry = {
+launchTerminal: () => {
+    // Determine start position
+    const x = 100 + (windowIdCounter * 20);
+    const y = 100 + (windowIdCounter * 20);
+
+    // 1. Define the HTML as a string (WindowManager will handle the {ID} replacement)
+const terminalHTML = `
+    <div style="display: flex; flex-direction: column; height: 100%; width: 100%; background: #000; box-sizing: border-box;">
+        <div id="term-out-{ID}" style="flex-grow: 1; overflow-y: auto; color: #0f0; padding: 10px; font-family: monospace; white-space: pre-wrap; font-size: 13px; border-bottom: 1px solid #333;"></div>
+        <div style="display: flex; flex-shrink: 0; padding: 5px 10px; align-items: flex-start;">
+            <span id="prompt-{ID}" style="color: #5bc0de; font-family: monospace; font-size: 13px; padding-right: 5px; white-space: nowrap; margin-top: 2px;">max@oxpy-wde:~</span>
+            <textarea id="term-in-{ID}" rows="1" style="flex-grow: 1; background: transparent; border: none; color: #fff; outline: none; font-family: monospace; font-size: 13px; resize: none; overflow: hidden;"></textarea>
+        </div>
+    </div>
+`;
+
+    // 2. Initialize the window using your existing constructor
+    new WindowManager('Ox-Py Terminal', x, y, terminalHTML, (winEl, id) => {
+        const out = document.getElementById(`term-out-${id}`);
+        const inp = document.getElementById(`term-in-${id}`);
+        const promptSpan = document.getElementById(`prompt-${id}`);
+
+        const termLog = (msg) => {
+            out.textContent += msg + "\n";
+            out.scrollTop = out.scrollHeight;
+        };
+
+        window.print_to_ui = (msg) => termLog(msg);
+
+        const updatePrompt = () => {
+            // THE GUARD: If kernel isn't loaded, show a temporary prompt
+            if (!pyodide || !pyodide.FS) {
+            promptSpan.textContent = `${currentUser || 'user'}@oxpy-wde:booting$ `;
+                return;
+            }
+            
+            const cwd = pyodide.FS.cwd();
+            // Map the mount point to ~ for that authentic Linux feel
+            const displayPath = cwd.startsWith(MOUNT_POINT) ? cwd.replace(MOUNT_POINT, '~') : cwd;
+            promptSpan.textContent = `${currentUser}@oxpy-wde:${displayPath}$ `;
+        };
+
+        // NEW: Expose this specific terminal's update function to the bootloader
+        window[`updateTerm_${id}`] = updatePrompt;
+        // First terminal becomes the system log target
+        if (!window.systemLog) window.systemLog = termLog;
+
+const termHistory = [];
+let histIdx = -1;
+let tabState = { matches: [], idx: -1, partial: null };
+
+inp.addEventListener('keydown', async (e) => {
+
+// AUTO-RESIZE Textarea to fit content
+    setTimeout(() => {
+        inp.style.height = 'auto';
+        inp.style.height = inp.scrollHeight + 'px';
+    }, 0);
+
+    // ── Tab Completion ──
+    if (e.key === 'Tab') {
+        e.preventDefault();
+        const tokens  = inp.value.split(' ');
+        const partial = tokens[tokens.length - 1];
+        const isCmd   = tokens.length === 1;
+
+        // Rebuild match list only when partial changes
+        if (partial !== tabState.partial) {
+            tabState = { matches: [], idx: -1, partial };
+            if (isCmd) {
+                const allCmds = [...Object.keys(ShellBuiltins), 'clear', 'history', 'run'];
+                tabState.matches = allCmds.filter(c => c.startsWith(partial)).sort();
+            } else if (pyodide) {
+                try {
+                    const exp   = expandPath(partial || '.');
+                    const slash = exp.lastIndexOf('/');
+                    const dir   = exp.substring(0, slash) || '/';
+                    const stub  = exp.substring(slash + 1);
+                    tabState.matches = pyodide.FS.readdir(dir)
+                        .filter(e => e !== '.' && e !== '..' && e.startsWith(stub))
+                        .sort()
+                        .map(e => {
+                            try {
+                                return pyodide.FS.isDir(pyodide.FS.stat((dir==='/'?'':dir)+'/'+e).mode)
+                                    ? e + '/' : e;
+                            } catch { return e; }
+                        });
+                } catch { tabState.matches = []; }
+            }
+        }
+
+        const { matches } = tabState;
+        if (!matches.length) return;
+
+        if (matches.length === 1) {
+            // Unique match — complete immediately
+            tokens[tokens.length - 1] = isCmd ? matches[0] + ' ' : matches[0];
+            inp.value = tokens.join(' ');
+            tabState  = { matches: [], idx: -1, partial: null };
+        } else {
+            // Multiple matches — show list on first Tab, cycle on subsequent Tabs
+            tabState.idx = (tabState.idx + 1) % matches.length;
+            if (tabState.idx === 0) termLog(matches.join('   '));
+            tokens[tokens.length - 1] = matches[tabState.idx];
+            inp.value = tokens.join(' ');
+        }
+        return;
+    }
+
+    // Any non-Tab key resets completion state
+    tabState = { matches: [], idx: -1, partial: null };
+
+    // ── Arrow history navigation ──
+    if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (histIdx < termHistory.length - 1) {
+            histIdx++;
+            inp.value = termHistory[termHistory.length - 1 - histIdx];
+            inp.setSelectionRange(inp.value.length, inp.value.length);
+        }
+        return;
+    }
+    if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        if (histIdx > 0) {
+            histIdx--;
+            inp.value = termHistory[termHistory.length - 1 - histIdx];
+        } else {
+            histIdx = -1;
+            inp.value = '';
+        }
+        inp.setSelectionRange(inp.value.length, inp.value.length);
+        return;
+    }
+
+    if (e.key !== 'Enter' || e.shiftKey) return;
+    e.preventDefault();
+
+    const rawInput = inp.value.trim();
+    inp.value = '';
+    histIdx = -1;
+
+    termLog(`${promptSpan.textContent}${rawInput}`);
+    if (!rawInput) return;
+
+    // Add to history (skip blank & consecutive dupes)
+    if (rawInput && termHistory[termHistory.length - 1] !== rawInput)
+        termHistory.push(rawInput);
+
+    const parsed = shellParseLine(rawInput);
+    const { cmd } = parsed;
+
+    // ── clear ──
+    if (cmd === 'clear') { out.textContent = ''; return; }
+
+    // ── history ──
+    if (cmd === 'history') {
+        termLog(termHistory.map((c, i) => `  ${String(i + 1).padStart(3)}  ${c}`).join('\n'));
+        return;
+    }
+
+    // ── run <file.py> ──
+    if (cmd === 'run') {
+        if (!parsed.args[0]) { termLog('Usage: run <file.py>'); return; }
+        try {
+            const src = pyodide.FS.readFile(expandPath(parsed.args[0]), { encoding: 'utf8' });
+            const res = await pyodide.runPythonAsync(src);
+            if (res !== undefined && res !== '') termLog(String(res));
+        } catch(e) { termLog('Error: ' + e); }
+        updatePrompt();
+        pyodide.FS.syncfs(false, () => AppRegistry.refreshAllExplorers());
+        return;
+    }
+
+    // ── shell built-in ──
+    if (ShellBuiltins[cmd]) {
+        window.activeTerminalLog = termLog; // always route system logs to active terminal
+        try {
+            const res = ShellBuiltins[cmd](parsed);
+            if (res !== undefined && res !== '') termLog(String(res));
+        } catch(e) { termLog(`${cmd}: ${e.message}`); }
+        updatePrompt();
+        if (pyodide) pyodide.FS.syncfs(false, () => AppRegistry.refreshAllExplorers());
+        return;
+    }
+
+    // ── Python fallback ──
+    if (!pyodide) { termLog('Kernel not ready yet...'); return; }
+    try {
+        await shellExecutePipeline(rawInput, { out, termLog, updatePrompt });
+        //if (res !== undefined && res !== '') termLog(String(res));
+        updatePrompt();
+        pyodide.FS.syncfs(false, () => AppRegistry.refreshAllExplorers());
+    } catch(e) { termLog('Error: ' + e); }
+});
+
+        // Final init
+        updatePrompt();
+        inp.focus();
+                        termLog("-----------------------------------------");
+                        termLog(" Ox-Py WDE v0.0.1 (WASM Desktop Environment) ");
+                        termLog(" CPython active | /myhome/ mounted ");
+                        termLog("-----------------------------------------");
+    });
+},
+
+launchEditor: (filePath = "") => {
+    startMenu.classList.remove('visible');
+    const id = windowIdCounter;
+    
+    new WindowManager("Text Editor", 150, 150, `
+        <div style="display:flex; flex-direction:column; height:100%; background: #1e1e1e;">
+            <div class="editor-toolbar" style="background:#333; padding:5px; display:flex; gap:5px; border-bottom: 1px solid #444;">
+                <button id="save-${id}" style="background:#28a745; color:white; border:none; padding:4px 12px; cursor:pointer; border-radius: 2px; font-size: 12px;">💾 Save</button>
+                <input type="text" id="path-${id}" value="${filePath}" placeholder="/mnt/persistent/script.py" 
+                    style="flex-grow:1; background:#222; color:#0f0; border:1px solid #444; padding:2px 8px; font-family: monospace; font-size: 12px;">
+                <span id="stat-${id}" style="color: #888; font-size: 10px; align-self: center; margin-right: 5px;"></span>
+            </div>
+            <textarea id="edit-${id}" spellcheck="false" 
+                style="flex-grow:1; background:#1e1e1e; color:#d4d4d4; border:none; padding:15px; font-family: 'Consolas', 'Monaco', 'Courier New', monospace; outline:none; resize:none; line-height: 1.5; font-size: 14px;"></textarea>
+        </div>
+    `, (winEl, winId) => {
+        const area = document.getElementById(`edit-${winId}`);
+        const pathInp = document.getElementById(`path-${winId}`);
+        const status = document.getElementById(`stat-${winId}`);
+        const saveBtn = document.getElementById(`save-${winId}`);
+        
+                    // --- LOAD LOGIC ---
+                    const loadFile = () => {
+                        const path = pathInp.value;
+                        if (!path || !pyodide) return;
+                        try {
+                            // Check if file exists before reading
+                            if (pyodide.FS.analyzePath(path).exists) {
+                                const content = pyodide.FS.readFile(path, { encoding: 'utf8' });
+                                area.value = content;
+                                status.innerText = "File loaded";
+                            }
+                        } catch (e) {
+                            console.warn("Editor Load Error:", e);
+                        }
+                    };
+
+                    // Initial load if a path is passed
+                    if (filePath) loadFile();
+
+                    // --- SAVE LOGIC ---
+                    saveBtn.onclick = () => {
+                        const path = pathInp.value.trim();
+                        if (!path) return alert("Error: No file path specified.");
+                        
+                        try {
+                            // Ensure directory exists (basic version)
+                            const folder = path.substring(0, path.lastIndexOf('/'));
+                            if (folder && !pyodide.FS.analyzePath(folder).exists) {
+                                pyodide.FS.mkdirTree(folder);
+                            }
+
+                            pyodide.FS.writeFile(path, area.value);
+                            
+                            // Sync to IndexedDB immediately
+                            pyodide.FS.syncfs(false, (err) => {
+                                if (err) throw err;
+                                status.innerText = "Saved successfully";
+                                AppRegistry.refreshAllExplorers();
+                                setTimeout(() => status.innerText = "", 3000);
+                            });
+                        } catch (e) {
+                            alert("Save Failed: " + e.message);
+                        }
+                    };
+
+                    // Auto-save shortcut: Ctrl+S
+                    area.addEventListener('keydown', (e) => {
+                        if (e.ctrlKey && e.key === 's') {
+                            e.preventDefault();
+                            saveBtn.click();
+                        }
+                    });
+                });
+            },
+
+            launchGraphicsApp: (appName = "Graphics Canvas") => {
+                startMenu.classList.remove('visible');
+                const id = windowIdCounter;
+                
+                new WindowManager(appName, 200, 100, `
+                    <div style="background:#000; display:flex; flex-direction:column; height:100%;">
+                        <canvas id="canvas-${id}" style="width:100%; height:100%; touch-action: none;" tabindex='1'></canvas>
+                    </div>
+                `, (winEl, winId) => {
+                    const canvas = document.getElementById(`canvas-${winId}`);
+                    
+                    // 1. Link the general 2D context
+                    pyodide.canvas.setCanvas2D(canvas);
+                    
+                    // 2. The "Glue" for Matplotlib: 
+                    // We create a global reference so we can tell Python exactly where to render
+                    window.lastActiveCanvas = canvas; 
+                    
+                    console.log("Graphics: Target canvas set to ID", winId);
+
+                    this.el.onmouseup = () => {
+                        if (window.lastActiveCanvas) {
+                            // This triggers a redraw in Matplotlib to fit the new window size
+                            window.dispatchEvent(new Event('resize'));
+                        }
+                    };
+                }
+            
+                );
+            },
+
+            launchSoftwareCenter: () => {
+                startMenu.classList.remove('visible');
+                const id = windowIdCounter;
+                
+                new WindowManager("Software Center", 250, 200, `
+                    <div style="padding: 20px; display: flex; flex-direction: column; gap: 10px; color: white;">
+                        <div style="font-size: 12px; color: #888;">Install Python Packages via Micropip</div>
+                        <input type="text" id="pkg-name-${id}" placeholder="e.g., pandas, requests, matplotlib" 
+                            style="padding: 8px; background: #111; border: 1px solid #444; color: white; border-radius: 4px;">
+                        <button id="install-btn-${id}" style="padding: 10px; background: #007acc; color: white; border: none; border-radius: 4px; cursor: pointer;">
+                            Install Package
+                        </button>
+                        <div id="status-${id}" style="font-family: monospace; font-size: 11px; margin-top: 10px; color: #0f0;"></div>
+                    </div>
+                `, (winEl, winId) => {
+                    const btn = document.getElementById(`install-btn-${winId}`);
+                    const input = document.getElementById(`pkg-name-${winId}`);
+                    const status = document.getElementById(`status-${winId}`);
+
+                        btn.onclick = async () => {
+                                const pkg = input.value.trim();
+                                if (!pkg) return;
+                                
+                                btn.disabled = true;
+                                status.innerText = `> Installing ${pkg}...`;
+                                
+                                try {
+                                    // 1. Install to current RAM
+                                    await pyodide.runPythonAsync(`
+                                        import micropip
+                                        await micropip.install('${pkg}')
+                                    `);
+
+                                    // 2. UPDATE THE PERSISTENT CONFIG FILE
+                                    const currentConfig = pyodide.FS.readFile(PKG_CONFIG_FILE, { encoding: 'utf8' });
+                                    if (!currentConfig.includes(`'${pkg}'`)) {
+                                        // Append the install command to the boot script
+                                        const updatedConfig = currentConfig + `\nawait micropip.install('${pkg}')`;
+                                        pyodide.FS.writeFile(PKG_CONFIG_FILE, updatedConfig);
+                                        
+                                        // Sync to browser storage
+                                        pyodide.FS.syncfs(false, () => {
+                                            status.innerText = `> ${pkg} installed and added to startup!`;
+                                        });
+                                    } else {
+                                        status.innerText = `> ${pkg} installed (already in startup).`;
+                                    }
+
+                                } catch (e) {
+                                    status.innerText = `> Error: ${e.message}`;
+                                } finally {
+                                    btn.disabled = false;
+                                }
+                            };
+                });
+            },
+
+            // --- UPDATED EXPLORER IN APP REGISTRY ---
+            launchExplorer: () => {
+                startMenu.classList.remove('visible');
+                const offset = (windowIdCounter * 20) % 100;
+                
+                new WindowManager(`Explorer`, 500 + offset, 100 + offset, `
+                    <div class="explorer-toolbar" style="padding: 5px; background: #333; display: flex; gap: 5px; border-bottom: 1px solid #444;">
+                        <button onclick="AppRegistry.navigateUp({ID})" style="background:#444; color:white; border:none; cursor:pointer; padding: 2px 8px;"><i class="fa-solid fa-chevron-up" style="color: rgb(234, 234, 234);"></i></button>
+                        <!-- <button onclick="AppRegistry.createItem({ID}, 'file')" style="background:#444; color:white; border:none; cursor:pointer; padding: 2px 8px;">+ File</button>
+                        <button onclick="AppRegistry.createItem({ID}, 'folder')" style="background:#444; color:white; border:none; cursor:pointer; padding: 2px 8px;">+ Folder</button> -->
+                        <span id="path-display-{ID}" style="color: #888; font-size: 11px; align-self: center; margin-left: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;"></span>
+                    </div>
+                    <div style="display: flex; height: 100%; overflow: hidden;">
+<div class="explorer-sidebar" style="width: 140px; background: #252525; border-right: 1px solid #444; padding: 10px; font-size: 12px; display: flex; flex-direction: column; gap: 8px;">
+    <div style="color: #666; font-weight: bold; font-size: 10px; text-transform: uppercase; margin-bottom: 4px;">Places</div>
+    
+    <div onclick="AppRegistry.navigateTo('${MOUNT_POINT}', {ID})" style="cursor:pointer; color: #ffffff; display: flex; align-items: center; gap: 8px;">
+        <i class="fa-solid fa-house-chimney" style="color: #5bc0de; width: 16px;"></i> Home
+    </div>
+
+    <div style="height: 1px; background: #444; margin: 4px 0;"></div> <div onclick="AppRegistry.navigateTo('${MOUNT_POINT}/Documents', {ID})" style="cursor:pointer; color: #ddd; display: flex; align-items: center; gap: 8px;">
+        <i class="fa-solid fa-file-lines" style="color: #a5d6a7; width: 16px;"></i> Documents
+    </div>
+    <div onclick="AppRegistry.navigateTo('${MOUNT_POINT}/Pictures', {ID})" style="cursor:pointer; color: #ddd; display: flex; align-items: center; gap: 8px;">
+        <i class="fa-solid fa-image" style="color: #ce93d8; width: 16px;"></i> Pictures
+    </div>
+    <div onclick="AppRegistry.navigateTo('${MOUNT_POINT}/Videos', {ID})" style="cursor:pointer; color: #ddd; display: flex; align-items: center; gap: 8px;">
+        <i class="fa-solid fa-video" style="color: #ffab91; width: 16px;"></i> Videos
+    </div>
+    <div onclick="AppRegistry.navigateTo('${MOUNT_POINT}/Downloads', {ID})" style="cursor:pointer; color: #ddd; display: flex; align-items: center; gap: 8px;">
+        <i class="fa-solid fa-circle-arrow-down" style="color: #fff59d; width: 16px;"></i> Downloads
+    </div>
+
+    <div style="height: 1px; background: #444; margin: 4px 0;"></div> <div onclick="AppRegistry.navigateTo('/', {ID})" style="cursor:pointer; color: #888; display: flex; align-items: center; gap: 8px; font-size: 11px;">
+        <i class="fa-solid fa-hard-drive" style="color: #777; width: 16px;"></i> Root FS
+    </div>
+</div>
+                        <div class="explorer-container" id="exp-out-{ID}" data-cwd="${MOUNT_POINT}" style="flex-grow: 1; padding: 10px; overflow-y: auto;">
+                            Loading...
+                        </div>
+                    </div>
+                `, (winEl, id) => {
+                    AppRegistry.renderExplorerView(id);
+                });
+            },
+
+            renderExplorerView: (id) => {
+                const container = document.getElementById(`exp-out-${id}`);
+                const pathDisplay = document.getElementById(`path-display-${id}`);
+                if (!container || !pyodide) return;
+
+                const cwd = container.getAttribute('data-cwd');
+                pathDisplay.innerText = cwd;
+
+                try {
+                    const files = pyodide.FS.readdir(cwd);
+                    let html = '';
+                    
+                    files.forEach(file => {
+                        if (file === '.' || file === '..') return;
+                        
+                        const fullPath = (cwd === '/' ? '' : cwd) + '/' + file;
+                        const stat = pyodide.FS.stat(fullPath);
+                        const isDir = pyodide.FS.isDir(stat.mode);
+                        // The fixed icon logic
+                        const icon = isDir 
+                            ? `<i class="fa-solid fa-folder" style="color: rgb(79, 129, 210); margin-right: 8px;"></i>` 
+                            : `<i class="fa-solid fa-file" style="color: rgb(177, 151, 252); margin-right: 8px;"></i>`;
+                        const typeClass = isDir ? 'file-dir' : 'file-file';
+
+                        // Define what happens when a file is clicked
+                        const clickAction = isDir 
+                            ? `AppRegistry.navigateTo('${fullPath}', ${id})` 
+                            : `AppRegistry.launchEditor('${fullPath}')`; // Open files in the editor!
+                        
+                        // Create a row with navigation (for dirs) and a delete button
+                        html += `
+                            <div class="file-item" 
+                                oncontextmenu="AppRegistry.showContextMenu(event, '${fullPath}', ${isDir}, ${id})"
+                                style="display: flex; align-items: center; justify-content: space-between; padding: 5px 10px;">
+                                <div class="${typeClass}" onclick="${clickAction}" style="display: flex; align-items: center; flex-grow: 1; cursor: pointer;">
+                                    ${icon} <span>${file}</span>
+                                </div>
+                            </div>`;
+                    });
+                    container.innerHTML = html || '<div style="padding:10px; color:#666;">Empty Directory</div>';
+                } catch (e) {
+                    container.innerHTML = `<div style="color:red; padding:10px;">Error: ${e.message}</div>`;
+                }
+            },
+
+            // --- NAVIGATION & FS OPS ---
+            navigateTo: (path, id) => {
+                const container = document.getElementById(`exp-out-${id}`);
+                container.setAttribute('data-cwd', path);
+                AppRegistry.renderExplorerView(id);
+            },
+
+            navigateUp: (id) => {
+                const container = document.getElementById(`exp-out-${id}`);
+                const cwd = container.getAttribute('data-cwd');
+                if (cwd === MOUNT_POINT) return; // Prevent leaving the persistent area
+                
+                const parts = cwd.split('/');
+                parts.pop();
+                const parent = parts.join('/') || '/';
+                AppRegistry.navigateTo(parent, id);
+            },
+
+            createItem: (id, type) => {
+                const container = document.getElementById(`exp-out-${id}`);
+                const cwd = container.getAttribute('data-cwd');
+                const name = prompt(`Enter ${type} name:`);
+                if (!name) return;
+
+                const fullPath = cwd + '/' + name;
+                try {
+                    if (type === 'file') pyodide.FS.writeFile(fullPath, '');
+                    else pyodide.FS.mkdir(fullPath);
+                    
+                    pyodide.FS.syncfs(false, () => AppRegistry.refreshAllExplorers());
+                } catch (e) {
+                    alert(e.message);
+                }
+            },
+
+            deleteItem: (path) => {
+                if (!confirm(`Delete ${path}?`)) return;
+                try {
+                    const stat = pyodide.FS.stat(path);
+                    if (pyodide.FS.isDir(stat.mode)) pyodide.FS.rmdir(path);
+                    else pyodide.FS.unlink(path);
+                    
+                    pyodide.FS.syncfs(false, () => AppRegistry.refreshAllExplorers());
+                } catch (e) {
+                    alert("Cannot delete: " + e.message);
+                }
+            },
+
+            renameItem: (path) => {
+                const oldName = path.split('/').pop();
+                const newName = prompt('Rename to:', oldName);
+                if (!newName || newName === oldName) return;
+                const dir     = path.substring(0, path.lastIndexOf('/'));
+                const newPath = dir + '/' + newName;
+                try {
+                    pyodide.FS.rename(path, newPath);
+                    pyodide.FS.syncfs(false, () => AppRegistry.refreshAllExplorers());
+                } catch (e) { alert('Rename failed: ' + e.message); }
+            },
+
+            pasteItem: (explorerId) => {
+                if (!osClipboard?.path || !pyodide) return;
+                const container = document.getElementById(`exp-out-${explorerId}`);
+                const dest = container.getAttribute('data-cwd') + '/' + osClipboard.name;
+                try {
+                    pyodide.FS.writeFile(dest, pyodide.FS.readFile(osClipboard.path));
+                    pyodide.FS.syncfs(false, () => AppRegistry.refreshAllExplorers());
+                } catch (e) { alert('Paste failed: ' + e.message); }
+            },
+
+            refreshAllExplorers: () => {
+                document.querySelectorAll('.explorer-container').forEach(el => {
+                    const id = el.id.replace('exp-out-', '');
+                    AppRegistry.renderExplorerView(id);
+                });
+            },
+
+
+runFileInTerminal: (path) => {
+    // 1. Open a new terminal window
+    AppRegistry.launchTerminal();
+
+    // 2. Wait a split second for the window to initialize, then pipe the command
+    setTimeout(async () => {
+        // We need to find the latest terminal input field
+        // Your ID counter helps us find the most recent one
+        const latestId = windowIdCounter - 1;
+        const inp = document.getElementById(`term-in-${latestId}`);
+        const out = document.getElementById(`term-out-${latestId}`);
+
+        if (inp && pyodide) {
+            // Put the command in the terminal for the user to see
+            const command = `run ${path}`;
+            
+            // Trigger the existing shell execution logic
+            // This mimics the user pressing 'Enter' in your terminal listener
+            try {
+                const src = pyodide.FS.readFile(path, { encoding: 'utf8' });
+                const res = await pyodide.runPythonAsync(src);
+                
+                // Print the output to the terminal window
+                if (window.systemLog) window.systemLog(`Running: ${path}...`);
+                if (res !== undefined && res !== '') window.systemLog(String(res));
+            } catch(err) {
+                if (window.systemLog) window.systemLog('Error: ' + err);
+            }
+        }
+    }, 100);
+},
+
+
+showContextMenu: (e, path, isDir, explorerId) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    applyMenuMode('file');
+    positionAndShowMenu(e);
+
+    // Get the "Run" menu item (assuming you have an element with this ID)
+    const runBtn = document.getElementById('ctx-run');
+    
+    // Show "Run" only if it's a .py file and NOT a directory
+    if (path.endsWith('.py') && !isDir) {
+        runBtn.style.display = 'block';
+        runBtn.onclick = () => {
+            hideMenu();
+            // Launch a new terminal and execute the run command
+            AppRegistry.runFileInTerminal(path);
+        };
+    } else {
+        if (runBtn) runBtn.style.display = 'none';
+    }
+
+    // Existing handlers...
+    document.getElementById('ctx-open').onclick   = () => { hideMenu(); if (isDir) AppRegistry.navigateTo(path, explorerId); else AppRegistry.launchEditor(path); };
+    document.getElementById('ctx-rename').onclick = () => { hideMenu(); AppRegistry.renameItem(path); };
+    document.getElementById('ctx-copy').onclick   = () => { osClipboard = { path, name: path.split('/').pop() }; hideMenu(); };
+    document.getElementById('ctx-paste').onclick  = () => { AppRegistry.pasteItem(explorerId); hideMenu(); };
+    document.getElementById('ctx-delete').onclick = () => { hideMenu(); AppRegistry.deleteItem(path); };
+    
+    // Existing export logic...
+    //document.getElementById('ctx-export').onclick = () => { /* ... */ };
+
+document.getElementById('ctx-export').onclick = () => {
+    hideMenu();
+    
+    // Replace 'window.lastContextTarget' with whatever variable 
+    // your File Explorer uses to track the right-clicked file
+    if (path) {
+        exportToHost(path);
+    } else {
+        alert("No file selected for export.");
+    }
+};
+    
+    return false;
+},
+
+        };
+
+   
+        // --- HOST OS IMPORT LOGIC ---
+const hostFileInput = document.getElementById('host-import-input');
+
+// Trigger the hidden file picker when the menu item is clicked
+document.getElementById('ctx-import').onclick = () => {
+    hideMenu();
+    hostFileInput.click();
+};
+
+// Handle the file selection
+hostFileInput.onchange = async (e) => {
+    const files = e.target.files;
+    if (!files.length || !pyodide) return;
+
+    const destDir = `${MOUNT_POINT}/Downloads`;
+
+    for (const file of files) {
+        try {
+            const arrayBuffer = await file.arrayBuffer();
+            const data = new Uint8Array(arrayBuffer);
+            const fullPath = `${destDir}/${file.name}`;
+
+            // Write to Pyodide VFS
+            pyodide.FS.writeFile(fullPath, data);
+            console.log(`Imported: ${file.name} to ${destDir}`);
+        } catch (err) {
+            console.error(`Failed to import ${file.name}:`, err);
+            alert(`Error importing ${file.name}`);
+        }
+    }
+
+    // Persist to IndexedDB and refresh UI
+    pyodide.FS.syncfs(false, (err) => {
+        if (err) console.error("Sync error:", err);
+        AppRegistry.refreshAllExplorers();
+    });
+
+    // Clear the input so the same file can be imported again if needed
+    hostFileInput.value = '';
+};
+
+
+
+// --- HOST OS EXPORT LOGIC ---
+const exportToHost = (vfsPath) => {
+    try {
+        const data = pyodide.FS.readFile(vfsPath);
+        const fileName = vfsPath.split('/').pop();
+        const blob = new Blob([data], { type: 'application/octet-stream' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        
+        a.href = url;
+        a.download = fileName;
+        document.body.appendChild(a);
+        a.click();
+        
+        setTimeout(() => {
+            document.body.removeChild(a);
+            window.URL.revokeObjectURL(url);
+        }, 0);
+    } catch (err) {
+        alert("Export failed: " + err.message);
+    }
+};
+
+
+
+
+
+
+// --- AUTH SYSTEM ---
+async function hashPassword(pw) {
+    // 1. Try native Web Crypto API (Works on localhost or HTTPS)
+    if (window.crypto && window.crypto.subtle) {
+        const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(pw));
+        return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2,'0')).join('');
+    }
+    
+    // 2. Fallback for insecure LAN contexts (HTTP)
+    console.warn("OS Warning: Insecure context detected. Using software fallback hash.");
+    let hash = 0;
+    for (let i = 0; i < pw.length; i++) {
+        const char = pw.charCodeAt(i);
+        hash = ((hash << 5) - hash) + char;
+        hash |= 0; // Convert to 32bit integer
+    }
+    // Return a hex string to match the expected format
+    return Math.abs(hash).toString(16).padStart(8, '0');
+}
+
+function getAccounts() {
+    return JSON.parse(localStorage.getItem('oxpy_accounts') || '{}');
+}
+
+function saveAccounts(accounts) {
+    localStorage.setItem('oxpy_accounts', JSON.stringify(accounts));
+}
+
+
+async function startOS() {
+    // Construct the path to your log file
+    const splashLogPath = `${MOUNT_POINT}/accepted_splash.log`;
+
+    // Check if the file exists using Pyodide's FS
+    const splashAccepted = pyodide.FS.analyzePath(splashLogPath).exists;
+
+    if (!splashAccepted) {
+        // Show the splash screen instead of launching apps
+        const splashEl = document.getElementById('splash-screen');
+        splashEl.style.display = 'flex';
+
+        document.getElementById('accept-splash-btn').onclick = () => {
+            // Create the log file so the splash doesn't show next time
+            pyodide.FS.writeFile(splashLogPath, `Accepted on: ${new Date().toISOString()}`);
+            
+            // Hide splash and launch apps
+            splashEl.style.display = 'none';
+            launchDefaultApps();
+        };
+    } else {
+        // Log file exists, proceed directly to desktop
+        launchDefaultApps();
+    }
+}
+
+function launchDefaultApps() {
+    // Existing logic to launch your environment
+    //AppRegistry.launchExplorer();
+    //AppRegistry.launchTerminal();
+}
+
+
+(function initLoginScreen() {
+    let isCreating = false;
+    const screen   = document.getElementById('login-screen');
+    const msgEl    = document.getElementById('login-msg');
+    const label    = document.getElementById('login-mode-label');
+    const submitBtn= document.getElementById('login-submit-btn');
+    const toggleBtn= document.getElementById('login-toggle');
+
+    toggleBtn.onclick = () => {
+        isCreating = !isCreating;
+        msgEl.textContent = '';
+        if (isCreating) {
+            label.textContent   = 'Create a new account';
+            submitBtn.textContent = 'Create Account';
+            toggleBtn.textContent = 'Already have an account? Login';
+        } else {
+            label.textContent   = 'Sign in to your account';
+            submitBtn.textContent = 'Login';
+            toggleBtn.textContent = 'Create a new account';
+        }
+    };
+
+    submitBtn.onclick = async () => {
+        const username = document.getElementById('login-username').value.trim().toLowerCase();
+        const password = document.getElementById('login-password').value;
+        msgEl.style.color = '#ff5555';
+
+        if (!username || !password) { msgEl.textContent = 'Username and password are required.'; return; }
+        if (!/^[a-z0-9_-]{2,24}$/.test(username)) { msgEl.textContent = 'Username: 2-24 chars, letters/numbers/_ only.'; return; }
+
+        const accounts = getAccounts();
+        const hashed   = await hashPassword(password);
+
+        if (isCreating) {
+            if (accounts[username]) { msgEl.textContent = 'Username already taken.'; return; }
+            accounts[username] = hashed;
+            saveAccounts(accounts);
+            msgEl.style.color = '#0f0';
+            msgEl.textContent = 'Account created! Logging in...';
+        } else {
+            if (!accounts[username])        { msgEl.textContent = 'No account found.'; return; }
+            if (accounts[username] !== hashed) { msgEl.textContent = 'Incorrect password.'; return; }
+        }
+
+        // --- LOGIN SUCCESS ---
+        currentUser  = username;
+        MOUNT_POINT  = `/myhome/${username}`;
+        PKG_CONFIG_FILE = MOUNT_POINT + '/packages_to_install_on_every_start.py';
+
+        submitBtn.disabled = true;
+        msgEl.style.color  = '#0f0';
+        msgEl.textContent  = `Welcome, ${username}! Booting...`;
+
+        setTimeout(() => {
+            screen.style.opacity = '0';
+            screen.style.transition = 'opacity 0.5s';
+            setTimeout(() => { screen.style.display = 'none'; bootSystem(); }, 500);
+        }, 600);
+    };
+
+    // Allow Enter key to submit
+    ['login-username','login-password'].forEach(id => {
+        document.getElementById(id).addEventListener('keydown', e => {
+            if (e.key === 'Enter') submitBtn.click();
+        });
+    });
+})();
+
+
+// Initialize the worker
+//window.compilerWorker = new Worker('compiler-worker.js', { type: 'module' });
+
+// Define the listener immediately
+/*window.compilerWorker.onmessage = (e) => {
+    const { type, msg, success, outputBase, outputFileContent } = e.data;
+    const log = window.activeTerminalLog || console.log;
+
+    if (type === 'STDOUT') { log(msg); return; }
+
+    if (type === 'DONE') {
+        if (!success) {
+            log(msg || 'CC: Compilation failed.');
+            return;
+        }
+
+        log('CC: Compilation successful.');
+
+        // Write the output binary next to the source file in the user's drive
+        if (outputBase && outputFileContent && window._ccSourceDir && pyodide) {
+            const outPath = `${window._ccSourceDir}/${outputBase}`; //.wasm
+            try {
+                pyodide.FS.writeFile(outPath, outputFileContent);
+                pyodide.FS.syncfs(false, () => {
+                    log(`CC: Output written to ${outPath}`);
+                    if (window.AppRegistry) AppRegistry.refreshAllExplorers();
+                });
+            } catch(fsErr) {
+                log(`CC: FS write error: ${fsErr.message}`);
+            }
+        }
+    }
+};
+// Signal the worker to download clang and lld
+window.compilerWorker.postMessage({ cmd: 'boot' }); */
+
+
+async function bootstrapCToolchain(forceReinstall = false) {
+    const log = window.activeTerminalLog || window.systemLog || console.log;
+
+    // Wait for Pyodide if needed — use the module-local `pyodide`, not window.pyodide (never set)
+    if (!pyodide) {
+        await new Promise(resolve => {
+            const check = setInterval(() => {
+                if (pyodide) { clearInterval(check); resolve(); }
+            }, 100);
+        });
+    }
+
+    const LIBS_PATH = `${MOUNT_POINT}/clibs`;
+    // Use the raw GitHub URL — GitHub Pages only has clang_lld.zip, not clibs.zip
+    const ZIP_URL   = 'https://partakithware.github.io/OxPy/clibs.zip';
+
+    if (!forceReinstall && pyodide.FS.analyzePath(LIBS_PATH).exists) {
+        log(`CC: C headers already installed at ${LIBS_PATH}`);
+        return;
+    }
+
+    log('CC: Installing C standard headers...');
+
+    try {
+        const response = await fetch(ZIP_URL);
+        if (!response.ok) throw new Error(`HTTP ${response.status} fetching ${ZIP_URL}`);
+        log(`CC: Download OK — extracting...`);
+
+        const zip = await JSZip.loadAsync(await response.blob());
+
+        // Wipe and recreate on reinstall
+        if (pyodide.FS.analyzePath(LIBS_PATH).exists) {
+            // shallow wipe — just remove the dir marker so we can repopulate
+        } else {
+            pyodide.FS.mkdir(LIBS_PATH);
+        }
+
+        // Strip root folder inside zip (e.g. oxpy_clibs/)
+        let fileCount = 0;
+        for (const [zipName, file] of Object.entries(zip.files)) {
+            const stripped = zipName.replace(/^[^\/]+\//, '');
+            if (!stripped) continue;
+
+            if (file.dir) {
+                const dirPath = `${LIBS_PATH}/${stripped.replace(/\/$/, '')}`;
+                try { pyodide.FS.mkdirTree(dirPath); } catch(e) {}
+            } else {
+                const content   = await file.async('uint8array');
+                const filePath  = `${LIBS_PATH}/${stripped}`;
+                const parentDir = filePath.substring(0, filePath.lastIndexOf('/'));
+                try { pyodide.FS.mkdirTree(parentDir); } catch(e) {}
+                pyodide.FS.writeFile(filePath, content);
+                fileCount++;
+            }
+        }
+
+        log(`CC: Extracted ${fileCount} header files.`);
+
+        pyodide.FS.syncfs(false, (err) => {
+            if (err) { log(`CC: Persist failed: ${err}`); }
+            else      { log(`CC: C headers installed and persisted to ${LIBS_PATH}`); }
+        });
+
+    } catch(err) {
+        log(`CC: Header install failed — ${err.message}`);
+        log(`CC: You can retry with: clibs install`);
+    }
+}
+
+
+// --- UPDATED KERNEL BOOTLOADER ---
+async function bootSystem() {
+    window.AppRegistry = AppRegistry;
+    window.shellExecutePipeline = shellExecutePipeline;
+   // AppRegistry.launchTerminal();
+   // AppRegistry.launchExplorer();
+
+    try {
+        pyodide = await loadPyodide();
+        await pyodide.loadPackage("micropip"); 
+
+        // 1. Mount /mnt/dev/
+        if (!pyodide.FS.analyzePath('/myhome').exists) pyodide.FS.mkdir('/myhome');
+        if (!pyodide.FS.analyzePath(MOUNT_POINT).exists) pyodide.FS.mkdir(MOUNT_POINT);
+
+        try { pyodide.FS.mount(pyodide.FS.filesystems.IDBFS, {}, MOUNT_POINT); } 
+        catch (e) { console.log("Re-mounting VFS..."); }
+
+    // 2. Initial Sync
+    pyodide.FS.syncfs(true, async function (err) {
+        // --- USER DIRECTORY INITIALIZATION ---
+        const homeDirs = [
+            `${MOUNT_POINT}`,
+            `${MOUNT_POINT}/Backups`,
+            `${MOUNT_POINT}/Documents`,
+            `${MOUNT_POINT}/Pictures`,
+            `${MOUNT_POINT}/Videos`,
+            `${MOUNT_POINT}/Downloads`
+        ];
+
+        homeDirs.forEach(dir => {
+            if (!pyodide.FS.analyzePath(dir).exists) {
+                pyodide.FS.mkdir(dir);
+                console.log(`OS: Created ${dir}`);
+            }
+        });
+
+        // 3. AUTO-INSTALL PACKAGES ON STARTUP
+        try {
+            if (pyodide.FS.analyzePath(PKG_CONFIG_FILE).exists) {
+                const script = pyodide.FS.readFile(PKG_CONFIG_FILE, { encoding: 'utf8' });
+                await pyodide.runPythonAsync(script);
+            } else {
+                pyodide.FS.writeFile(PKG_CONFIG_FILE, "import micropip\n# Add packages below\n\nawait micropip.install('ppci')");
+            }
+            // Save the new home structure to IndexedDB
+            pyodide.FS.syncfs(false, () => {});
+        } catch (pkgErr) {
+            console.error("Package Auto-Load Failed:", pkgErr);
+        }
+
+        // NEW: Ping all active terminals to update their prompts now that FS is ready
+        for (let i = 0; i < windowIdCounter; i++) {
+            if (window[`updateTerm_${i}`]) {
+                window[`updateTerm_${i}`]();
+            }
+        }
+        AppRegistry.refreshAllExplorers();
+        startOS();
+        // Bootstrap C toolchain AFTER IDBFS is synced — now MOUNT_POINT exists and is writable
+        //bootstrapCToolchain();
+    });
+
+    } catch (err) {
+        console.error("Kernel Panic: ", err);
+    }
+}
+
+        // Engage! -- Commented out, now login handles bootup.
+        //bootSystem();
+    </script>
+
+<script>
+const container = document.getElementById('desktop-bg');
+const canvas = document.createElement('canvas');
+const ctx = canvas.getContext('2d');
+container.appendChild(canvas);
+
+let flows = [];
+
+function resize() {
+    // Force the internal canvas resolution to match the window exactly
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+    
+    // Re-initialize to ensure waves recalibrate to new width
+    init();
+}
+window.addEventListener('resize', resize);
+
+class SilkStream {
+    constructor(color, yPos, speed, frequency) {
+        this.color = color;
+        this.yBase = canvas.height * yPos;
+        this.step = Math.random() * 1000;
+        this.speed = speed;
+        this.frequency = frequency; // How many waves across the screen
+        this.amplitude = canvas.height * 0.25;
+    }
+
+    draw() {
+        this.step += this.speed;
+        
+        ctx.beginPath();
+        ctx.strokeStyle = this.color;
+        ctx.lineWidth = 120; // Massive lines to fill space smoothly
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+
+        // START: Well off-screen left
+        ctx.moveTo(-200, this.yBase);
+
+        // THE FIX: Loop from 0 to canvas.width explicitly
+        // x += canvas.width / 20 ensures we always have 20 points across ANY width
+        const segmentCount = 20;
+        const segmentWidth = (canvas.width + 400) / segmentCount;
+
+        for (let i = 0; i <= segmentCount; i++) {
+            const x = -200 + (i * segmentWidth);
+            
+            // PS4/5 style wave interference
+            const y = this.yBase + 
+                      Math.sin(i * this.frequency + this.step) * this.amplitude +
+                      Math.cos(i * (this.frequency * 0.5) - this.step * 0.8) * (this.amplitude * 0.6);
+            
+            ctx.lineTo(x, y);
+        }
+
+        ctx.stroke();
+    }
+}
+
+function init() {
+    flows = [
+        new SilkStream('rgba(0, 100, 255, 0.7)', 0.5, 0.005, 0.4),  // Deep Blue
+        new SilkStream('rgba(150, 0, 255, 0.6)', 0.48, 0.003, 0.3), // Purple
+        new SilkStream('rgba(0, 255, 200, 0.5)', 0.52, 0.007, 0.5), // Teal
+        new SilkStream('rgba(50, 50, 200, 0.4)', 0.5, 0.002, 0.2)   // Background Silk
+    ];
+}
+
+function animate() {
+    ctx.globalCompositeOperation = 'source-over';
+    // Use a very dark fill instead of clear to help the "blur" look cleaner
+    ctx.fillStyle = '#050508';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    ctx.globalCompositeOperation = 'screen';
+    flows.forEach(f => f.draw());
+
+    requestAnimationFrame(animate);
+}
+
+//resize(); // Set initial size and init flows
+//animate();
+</script>
+
+</body>
+</html>
