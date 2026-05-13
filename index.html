@@ -1673,6 +1673,9 @@ const terminalHTML = `
             pyodide.setStdout({
                 batched: (msg) => termLog(msg)
             });
+            pyodide.setStderr({
+                batched: (msg) => termLog("Error: " + msg)
+            });
 
         window.print_to_ui = (msg) => termLog(msg);
 
