@@ -1423,6 +1423,7 @@ len(wasm)
             '│  cc <file.c>  Compile C to WASM (PPCI Experimental)        │',
             '│  opcc <file.c> Compile C to WASM (TCC-O-PPCI Experimental) │',
             '│  clibs [status|install] Check or install clibs for cc/opcc │',
+            '│  backup-wde Backup your /myhome/ into a zip for extract    │',
             '│  help                        This help screen              │',
             '├────────────────────────────────────────────────────────────┤',
             '│  Anything else runs as Python.  ↑↓ = history navigation.  │',
@@ -1455,6 +1456,66 @@ async function shellExecutePipeline(rawInput, { out, termLog, updatePrompt }) {
         parsed.stdin = pipeStdin;
         const { cmd } = parsed;
         let result = '';
+        
+        if (cmd == 'backup-wde'){
+            const nBytes = await pyodide.runPythonAsync(`
+import zipfile
+import os
+from datetime import datetime
+
+def backup_workspace():
+    try:
+        # 1. Dynamically find the username from /myhome/
+        base_home = "/myhome"
+        if not os.path.exists(base_home):
+            print(f"Error: {base_home} mount not found.")
+            return
+
+        users = [d for d in os.listdir(base_home) if os.path.isdir(os.path.join(base_home, d))]
+        
+        if not users:
+            print("Error: No user directory found in /myhome")
+            return
+            
+        username = users[0] 
+        build_dir = os.path.join(base_home, username)
+        backup_note = "/Backups"
+        root_dir = (build_dir + backup_note)
+
+        
+        # 2. FORCE the zip to save INSIDE the user's home directory
+        # This ensures it shows up in your Explorer under /myhome/username/
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M")
+        zip_name = f"workspace_{username}_{timestamp}.zip"
+        zip_path = os.path.join(root_dir, zip_name)
+
+        print(f"Detected User: {username}")
+        print(f"Creating archive at: {zip_path}")
+        
+        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            for root, dirs, files in os.walk(root_dir):
+                for file in files:
+                    full_path = os.path.join(root, file)
+                    
+                    # CRITICAL: Do not zip the backup file into itself
+                    if full_path == zip_path:
+                        continue
+                        
+                    # Maintain directory structure relative to the user's home
+                    rel_path = os.path.relpath(full_path, root_dir)
+                    zipf.write(full_path, rel_path)
+        
+        print(f"Success! Backup saved to: {zip_path}")
+        print("Refresh your Explorer to see the file.")
+        
+    except Exception as e:
+        print(f"Backup Error: {e}")
+
+backup_workspace()            
+            `);
+        return;
+        }
+
 
         // --- C COMPILER (ppci — compiles entirely inside Pyodide, no worker needed) ---
         if (cmd === 'cc' || cmd === 'gcc' || cmd === 'clang') {
