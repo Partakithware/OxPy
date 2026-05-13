@@ -1669,6 +1669,11 @@ const terminalHTML = `
             out.scrollTop = out.scrollHeight;
         };
 
+        // Add this inside your initialization block
+            pyodide.setStdout({
+                batched: (msg) => termLog(msg)
+            });
+
         window.print_to_ui = (msg) => termLog(msg);
 
         const updatePrompt = () => {
