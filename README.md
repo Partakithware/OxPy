@@ -1,5 +1,5 @@
 
-Visit here: ![Oxpy](https://partakithware.github.io/OxPy/)
+Visit here: https://partakithware.github.io/OxPy/
 
 Ox-Py WDE (AI Readme, some stuff is faulty, I will fix it later :/, anyhow 'opcc' does tcc-o-ppci-wasm which is how tcc is used right now if used. 'cc' just uses ppci, the AI said some other BS about tcc and such, but you get the gist, sorry will do README later)
 
